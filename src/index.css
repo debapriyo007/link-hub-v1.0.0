@@ -1,0 +1,220 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-sans: "Outfit", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-display: "Outfit", sans-serif;
+  --font-mono: "JetBrains Mono", monospace;
+}
+
+@layer base {
+  :root {
+    --background: #09090b;
+    --foreground: #ffffff;
+    --card-bg: rgba(24, 24, 27, 0.62);
+    --card-border: rgba(255, 255, 255, 0.09);
+    --divider: rgba(255, 255, 255, 0.08);
+    --primary: #ff9000;
+    --primary-hover: #ffa31a;
+    --primary-foreground: #000000;
+    --secondary: rgba(39, 39, 42, 0.7);
+    --success: #22c55e;
+    --warning: #ff9000;
+    --danger: #ef4444;
+    --muted: #a1a1aa;
+    --muted-bg: rgba(34, 34, 38, 0.65);
+  }
+
+  .light {
+    --background: #f4f4f5;
+    --foreground: #111111;
+    --card-bg: rgba(255, 255, 255, 0.78);
+    --card-border: rgba(0, 0, 0, 0.08);
+    --divider: #e4e4e7;
+    --primary: #ff9000;
+    --primary-hover: #ffa31a;
+    --primary-foreground: #000000;
+    --secondary: #e4e4e7;
+    --success: #16a34a;
+    --warning: #ff9000;
+    --danger: #dc2626;
+    --muted: #71717a;
+    --muted-bg: #f4f4f5;
+  }
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: "Outfit", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  margin: 0;
+  padding: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  -webkit-tap-highlight-color: transparent;
+}
+
+h1,
+h2,
+h3,
+.font-title,
+.font-heading {
+  font-family: "Outfit", sans-serif;
+}
+
+.font-content,
+.font-sans {
+  font-family: "Outfit", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.search-typing-font {
+  font-family: "Outfit", sans-serif;
+}
+
+.font-brand {
+  font-family: "Montserrat", "Outfit", sans-serif;
+  letter-spacing: -0.04em;
+}
+
+.font-mono {
+  font-family: "JetBrains Mono", monospace;
+}
+
+/* Signature Glassmorphism Surfaces — Optimized for 60fps Rendering */
+.glass-panel {
+  background: linear-gradient(
+    135deg,
+    rgba(26, 26, 31, 0.86) 0%,
+    rgba(16, 16, 20, 0.78) 100%
+  );
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow:
+    0 20px 50px rgba(0, 0, 0, 0.6),
+    inset 0 1px 0 rgba(255, 255, 255, 0.11);
+}
+
+.glass-card {
+  background: linear-gradient(
+    145deg,
+    rgba(28, 28, 34, 0.82) 0%,
+    rgba(17, 17, 22, 0.76) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.4),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transform: translateZ(0);
+}
+
+.glass-input {
+  background: rgba(255, 255, 255, 0.045);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+/* Hide scrollbar for horizontal pill bars while keeping touch scroll */
+.no-scrollbar::-webkit-scrollbar,
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar,
+.scrollbar-none {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* Custom sleek scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090b;
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #2e2e2e;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #ff9000;
+}
+
+/* Custom Toast Entrance & Progress Animations */
+@keyframes toast-enter-desktop {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -12px, 0) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes toast-enter-mobile {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, -12px, 0) scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+@keyframes toast-progress {
+  0% {
+    transform: scaleX(1);
+  }
+  100% {
+    transform: scaleX(0);
+  }
+}
+
+.toast-enter {
+  animation: toast-enter-mobile 240ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@media (min-width: 640px) {
+  .toast-enter {
+    animation: toast-enter-desktop 240ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  }
+}
+
+.toast-progress-bar {
+  transform-origin: left center;
+  animation: toast-progress var(--toast-duration, 3600ms) linear forwards;
+}
+
+/* Industry-Standard Unified Whole-Component Lock Screen Zoom-In */
+@keyframes lock-stage-zoom-in {
+  0% {
+    opacity: 0;
+    transform: scale3d(0.94, 0.94, 1);
+  }
+  100% {
+    opacity: 1;
+    transform: scale3d(1, 1, 1);
+  }
+}
+
+.lock-stage-zoom-in {
+  will-change: transform, opacity;
+  transform-origin: center center;
+  animation: lock-stage-zoom-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lock-stage-zoom-in {
+    animation: none !important;
+    transform: none !important;
+    opacity: 1 !important;
+  }
+}

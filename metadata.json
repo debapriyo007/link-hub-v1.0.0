@@ -1,0 +1,6 @@
+{
+  "name": "Linkora Vault - Retro Edition",
+  "description": "Save, organize, and categorize important links with PIN security, QR beam sharing, and classic retro desktop interface.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,254 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated user profile and vault security configuration.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Immutable Firebase Auth UID of the owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email address of the user.",
+          "minLength": 3,
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Display name of the user.",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "photoURL": {
+          "type": "string",
+          "description": "Profile avatar URL or compact compressed data URL.",
+          "minLength": 0,
+          "maxLength": 32768
+        },
+        "pin": {
+          "type": "string",
+          "description": "Optional 6-digit vault lock PIN or empty string when disabled.",
+          "minLength": 0,
+          "maxLength": 6,
+          "pattern": "^([0-9]{6})?$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user profile was last updated."
+        }
+      },
+      "required": ["uid", "email", "displayName", "photoURL", "pin", "createdAt", "updatedAt"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "User-defined or default bookmark category stored inside the user's vault.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Category document identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who owns this category.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name of the category.",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "slug": {
+          "type": "string",
+          "description": "URL-friendly category slug.",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "color": {
+          "type": "string",
+          "description": "Hex color code for the category badge.",
+          "minLength": 4,
+          "maxLength": 20
+        },
+        "icon": {
+          "type": "string",
+          "description": "Icon identifier name.",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional category description.",
+          "minLength": 0,
+          "maxLength": 240
+        },
+        "isDefault": {
+          "type": "boolean",
+          "description": "Whether this is a starter category."
+        },
+        "order": {
+          "type": "number",
+          "description": "Display sort order index."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the category was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the category was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "name",
+        "slug",
+        "color",
+        "icon",
+        "description",
+        "isDefault",
+        "order",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "LinkItem": {
+      "title": "LinkItem",
+      "description": "Bookmark item stored in the user's private cloud vault.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Bookmark document identifier.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "description": "UID of the user who owns this bookmark.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "description": "Bookmark title.",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Destination URL of the bookmark.",
+          "minLength": 4,
+          "maxLength": 2048
+        },
+        "categorySlug": {
+          "type": "string",
+          "description": "Slug of the category this bookmark belongs to.",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "description": {
+          "type": "string",
+          "description": "Notes or summary for the bookmark.",
+          "minLength": 0,
+          "maxLength": 500
+        },
+        "tags": {
+          "type": "array",
+          "description": "Bounded list of up to 10 string tags."
+        },
+        "isFavorite": {
+          "type": "boolean",
+          "description": "Whether the bookmark is starred."
+        },
+        "clickCount": {
+          "type": "number",
+          "description": "Number of times the user has opened this bookmark."
+        },
+        "imageUrl": {
+          "type": "string",
+          "description": "Optional preview image URL.",
+          "minLength": 0,
+          "maxLength": 2048
+        },
+        "faviconUrl": {
+          "type": "string",
+          "description": "Favicon URL for the bookmark domain.",
+          "minLength": 0,
+          "maxLength": 2048
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the bookmark was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the bookmark was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "userId",
+        "title",
+        "url",
+        "categorySlug",
+        "description",
+        "tags",
+        "isFavorite",
+        "clickCount",
+        "imageUrl",
+        "faviconUrl",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserProfile"
+      },
+      "description": "Private user profile and vault security configuration document."
+    },
+    "/users/{userId}/categories/{categoryId}": {
+      "schema": {
+        "$ref": "#/entities/Category"
+      },
+      "description": "User's private bookmark categories subcollection."
+    },
+    "/users/{userId}/links/{linkId}": {
+      "schema": {
+        "$ref": "#/entities/LinkItem"
+      },
+      "description": "User's private bookmarks subcollection."
+    }
+  }
+}

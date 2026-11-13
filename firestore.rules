@@ -1,0 +1,243 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // Global Hardened Primitives
+    // =========================================================================
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && (
+        request.auth.token.email_verified == true ||
+        request.auth.token.firebase.sign_in_provider == 'password'
+      );
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // =========================================================================
+    // Entity Validation Blueprints (Synchronized with firebase-blueprint.json)
+    // =========================================================================
+    function isValidUserProfile(data, userId) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'photoURL', 'pin', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'pin', 'createdAt', 'updatedAt'])
+        && data.uid is string
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.uid.size() >= 1
+        && data.uid.size() <= 128
+        && data.uid.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.email is string
+        && data.email.size() >= 3
+        && data.email.size() <= 254
+        && data.displayName is string
+        && data.displayName.size() >= 1
+        && data.displayName.size() <= 100
+        && data.photoURL is string
+        && data.photoURL.size() <= 32768
+        && data.pin is string
+        && data.pin.size() <= 6
+        && data.pin.matches('^([0-9]{6})?$')
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCategory(data, userId, categoryId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'name', 'slug', 'color', 'icon',
+          'description', 'isDefault', 'order', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'name', 'slug', 'color', 'icon',
+          'description', 'isDefault', 'order', 'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == categoryId
+        && data.id.size() >= 1
+        && data.id.size() <= 128
+        && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.userId is string
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.userId.size() >= 1
+        && data.userId.size() <= 128
+        && data.userId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.name is string
+        && data.name.size() >= 1
+        && data.name.size() <= 60
+        && data.slug is string
+        && data.slug.size() >= 1
+        && data.slug.size() <= 60
+        && data.slug.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.color is string
+        && data.color.size() >= 4
+        && data.color.size() <= 20
+        && data.icon is string
+        && data.icon.size() >= 1
+        && data.icon.size() <= 40
+        && data.description is string
+        && data.description.size() <= 240
+        && data.isDefault is bool
+        && data.order is number
+        && data.order >= 0
+        && data.order <= 10000
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidLinkItem(data, userId, linkId) {
+      return data.keys().hasAll([
+          'id', 'userId', 'title', 'url', 'categorySlug', 'description',
+          'tags', 'isFavorite', 'clickCount', 'imageUrl', 'faviconUrl',
+          'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'userId', 'title', 'url', 'categorySlug', 'description',
+          'tags', 'isFavorite', 'clickCount', 'imageUrl', 'faviconUrl',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id is string
+        && data.id == linkId
+        && data.id.size() >= 1
+        && data.id.size() <= 128
+        && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.userId is string
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.userId.size() >= 1
+        && data.userId.size() <= 128
+        && data.userId.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.title is string
+        && data.title.size() >= 1
+        && data.title.size() <= 160
+        && data.url is string
+        && data.url.size() >= 4
+        && data.url.size() <= 2048
+        && data.categorySlug is string
+        && data.categorySlug.size() >= 1
+        && data.categorySlug.size() <= 60
+        && data.categorySlug.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.description is string
+        && data.description.size() <= 500
+        && data.tags is list
+        && data.tags.size() <= 10
+        && (data.tags.size() == 0 || (data.tags[0] is string && data.tags[0].size() >= 1 && data.tags[0].size() <= 40))
+        && data.isFavorite is bool
+        && data.clickCount is number
+        && data.clickCount >= 0
+        && data.clickCount <= 100000000
+        && data.imageUrl is string
+        && data.imageUrl.size() <= 2048
+        && data.faviconUrl is string
+        && data.faviconUrl.size() <= 2048
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // Collection Rules: /users/{userId}
+    // =========================================================================
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId);
+      allow list: if false;
+
+      allow create: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isOwner(userId)
+        && isValidId(userId)
+        && isValidUserProfile(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time;
+
+      allow delete: if false;
+
+      // =======================================================================
+      // Subcollection: /users/{userId}/categories/{categoryId}
+      // =======================================================================
+      match /categories/{categoryId} {
+        allow get: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(categoryId);
+
+        allow list: if isOwner(userId)
+          && isValidId(userId);
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(categoryId)
+          && isValidCategory(incoming(), userId, categoryId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(categoryId)
+          && isValidCategory(incoming(), userId, categoryId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time;
+
+        allow delete: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(categoryId)
+          && existing().isDefault == false;
+      }
+
+      // =======================================================================
+      // Subcollection: /users/{userId}/links/{linkId}
+      // =======================================================================
+      match /links/{linkId} {
+        allow get: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(linkId);
+
+        allow list: if isOwner(userId)
+          && isValidId(userId);
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(linkId)
+          && isValidLinkItem(incoming(), userId, linkId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(linkId)
+          && isValidLinkItem(incoming(), userId, linkId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time;
+
+        allow delete: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(linkId);
+      }
+    }
+  }
+}
