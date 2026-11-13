@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import { Eye, EyeOff, AlertCircle, CheckCircle2, QrCode } from 'lucide-react';
+import { Eye, EyeOff, QrCode } from 'lucide-react';
 import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
@@ -8,6 +8,7 @@ import {
 import { auth, googleProvider, signInWithPopup } from '../firebase.ts';
 import { playRetroUnlockChime, playRetroBeep } from '../utils/sound.ts';
 import { LinkHubLogo } from './LinkHubLogo.tsx';
+import { ToastVariant } from './ui/Toast.tsx';
 
 interface LoginPageProps {
   onOpenScanQr?: () => void;
@@ -15,15 +16,15 @@ interface LoginPageProps {
     categoryName: string;
     linkCount: number;
   } | null;
+  onShowToast?: (message: string, variant?: ToastVariant) => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({
   onOpenScanQr,
   pendingSharedSummary,
+  onShowToast,
 }) => {
   const [isSigningIn, setIsSigningIn] = useState(false);
-  const [authError, setAuthError] = useState<string | null>(null);
-  const [resetSuccess, setResetSuccess] = useState<string | null>(null);
   const [isCreateAccount, setIsCreateAccount] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState('');
@@ -53,20 +54,18 @@ export const LoginPage: React.FC<LoginPageProps> = ({
 
   const handleGoogleLogin = async () => {
     setIsSigningIn(true);
-    setAuthError(null);
-    setResetSuccess(null);
     try {
       await signInWithPopup(auth, googleProvider);
       playRetroUnlockChime();
     } catch (err: unknown) {
       playRetroBeep();
-      const message = err instanceof Error ? err.message : 'Authentication could not be completed.';
+      const message = err instanceof Error ? err.message : 'Sign-in could not be completed!';
       if (message.includes('auth/popup-closed-by-user')) {
-        setAuthError('Sign-in popup was closed before finishing. Please try again.');
+        onShowToast?.('Sign-in popup closed. Try again!', 'error');
       } else if (message.includes('auth/popup-blocked')) {
-        setAuthError('Sign-in popup was blocked by your browser. Please allow popups for this site.');
+        onShowToast?.('Sign-in popup blocked by browser!', 'error');
       } else {
-        setAuthError(message);
+        onShowToast?.(message, 'error');
       }
     } finally {
       setIsSigningIn(false);
@@ -74,37 +73,35 @@ export const LoginPage: React.FC<LoginPageProps> = ({
   };
 
   const handleForgotPassword = async () => {
-    setAuthError(null);
-    setResetSuccess(null);
     if (!email.trim()) {
-      setAuthError('Please enter your email address first to reset your password.');
+      onShowToast?.('Enter your email address first!', 'error');
       emailInputRef.current?.focus();
       return;
     }
     try {
       await sendPasswordResetEmail(auth, email.trim());
-      setResetSuccess('Password reset link sent to your email address.');
+      onShowToast?.('Password reset link sent to your email!', 'success');
     } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Could not send reset email.';
-      setAuthError(message);
+      const message = err instanceof Error ? err.message : 'Could not send reset email!';
+      onShowToast?.(message, 'error');
     }
   };
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setResetSuccess(null);
     if (!email.trim()) {
-      setAuthError('Please enter your email address.');
+      playRetroBeep();
+      onShowToast?.('Please enter your email address!', 'error');
       emailInputRef.current?.focus();
       return;
     }
     if (!password.trim()) {
-      setAuthError('Please enter your password.');
+      playRetroBeep();
+      onShowToast?.('Please enter your password!', 'error');
       return;
     }
 
     setIsSigningIn(true);
-    setAuthError(null);
     try {
       if (isCreateAccount) {
         await createUserWithEmailAndPassword(auth, email.trim(), password);
@@ -114,13 +111,13 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       playRetroUnlockChime();
     } catch (err: unknown) {
       playRetroBeep();
-      const message = err instanceof Error ? err.message : 'Unable to sign in with email.';
+      const message = err instanceof Error ? err.message : 'Unable to sign in with email!';
       if (message.includes('auth/operation-not-allowed')) {
-        setAuthError('Email/Password sign-in is not enabled yet. Please use Google login below.');
+        onShowToast?.('Use Google login to sign in!', 'error');
       } else if (message.includes('auth/invalid-credential') || message.includes('auth/wrong-password')) {
-        setAuthError('Invalid email or password. Please check your credentials.');
+        onShowToast?.('Invalid email or password!', 'error');
       } else {
-        setAuthError(message);
+        onShowToast?.(message, 'error');
       }
     } finally {
       setIsSigningIn(false);
@@ -474,21 +471,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 </div>
               )}
 
-              {/* Error or Reset Status Alert */}
-              {authError && (
-                <div className="w-full mb-5 p-3.5 rounded-2xl bg-red-950/50 backdrop-blur-md border border-red-500/40 text-red-300 text-xs flex items-start gap-2.5 text-left">
-                  <AlertCircle size={15} className="text-red-400 shrink-0 mt-0.5" />
-                  <span>{authError}</span>
-                </div>
-              )}
-
-              {resetSuccess && (
-                <div className="w-full mb-5 p-3.5 rounded-2xl bg-emerald-950/50 backdrop-blur-md border border-emerald-500/40 text-emerald-300 text-xs flex items-start gap-2.5 text-left">
-                  <CheckCircle2 size={15} className="text-emerald-400 shrink-0 mt-0.5" />
-                  <span>{resetSuccess}</span>
-                </div>
-              )}
-
               {/* Email & Password Form */}
               <form onSubmit={handleEmailSubmit} className="w-full space-y-3.5 sm:space-y-4" noValidate>
                 <div>
@@ -497,10 +479,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     type="email"
                     aria-label="Email address"
                     value={email}
-                    onChange={(e) => {
-                      setEmail(e.target.value);
-                      if (authError) setAuthError(null);
-                    }}
+                    onChange={(e) => setEmail(e.target.value)}
                     placeholder="Email address"
                     className="w-full h-12 sm:h-14 px-4 sm:px-5 rounded-2xl glass-input focus:border-[#ff9000] focus:bg-white/[0.07] text-sm text-white placeholder:text-zinc-400 outline-none transition-all"
                   />
@@ -511,10 +490,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                     type={showPassword ? 'text' : 'password'}
                     aria-label="Password"
                     value={password}
-                    onChange={(e) => {
-                      setPassword(e.target.value);
-                      if (authError) setAuthError(null);
-                    }}
+                    onChange={(e) => setPassword(e.target.value)}
                     placeholder="Password"
                     className="w-full h-12 sm:h-14 pl-4 sm:pl-5 pr-12 rounded-2xl glass-input focus:border-[#ff9000] focus:bg-white/[0.07] text-sm text-white placeholder:text-zinc-400 outline-none transition-all"
                   />
@@ -578,11 +554,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({
                 {isCreateAccount ? 'Already have an account? ' : "Don't have an account? "}
                 <button
                   type="button"
-                  onClick={() => {
-                    setIsCreateAccount(!isCreateAccount);
-                    setAuthError(null);
-                    setResetSuccess(null);
-                  }}
+                  onClick={() => setIsCreateAccount(!isCreateAccount)}
                   className="text-[#ff9000] font-semibold underline underline-offset-4 hover:text-[#ffa31a] transition-colors cursor-pointer"
                 >
                   {isCreateAccount ? 'Login' : 'Signup'}

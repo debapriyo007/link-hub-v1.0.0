@@ -3,6 +3,7 @@ import { Eye, EyeOff, Delete, ArrowLeft, KeyRound } from 'lucide-react';
 import { BsPersonLock } from 'react-icons/bs';
 import { playRetroClick, playRetroBeep, playRetroUnlockChime } from '../../utils/sound.ts';
 import { LinkHubLogo } from '../LinkHubLogo.tsx';
+import { ToastVariant } from '../ui/Toast.tsx';
 
 interface LockedScreenProps {
   onUnlock: () => void;
@@ -13,6 +14,7 @@ interface LockedScreenProps {
   securityQuestion?: string;
   securityAnswer?: string;
   onResetPin: (newPin: string | null) => void;
+  onShowToast?: (message: string, variant?: ToastVariant) => void;
 }
 
 export const LockedScreen: React.FC<LockedScreenProps> = ({
@@ -23,13 +25,13 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
   securityQuestion,
   securityAnswer,
   onResetPin,
+  onShowToast,
 }) => {
   const [pin, setPin] = useState('');
   const [showNumbers, setShowNumbers] = useState(false);
-  const [error, setError] = useState('');
+  const [pinError, setPinError] = useState(false);
   const [mode, setMode] = useState<'unlock' | 'security-question' | 'set-new-pin'>('unlock');
   const [answerInput, setAnswerInput] = useState('');
-  const [answerError, setAnswerError] = useState('');
   const [enterCycle, setEnterCycle] = useState(1);
   const [isRevealing, setIsRevealing] = useState(
     () => typeof document === 'undefined' || document.visibilityState === 'visible'
@@ -98,7 +100,7 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
       playRetroClick();
       const nextPin = pin + digit;
       setPin(nextPin);
-      setError('');
+      setPinError(false);
 
       if (nextPin.length === 6) {
         if (mode === 'set-new-pin') {
@@ -112,27 +114,29 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
           onUnlock();
         } else {
           playRetroBeep();
-          setError('Incorrect PIN code. Please try again.');
+          setPinError(true);
+          onShowToast?.('Incorrect PIN code. Try again!', 'error');
           setTimeout(() => {
             setPin('');
+            setPinError(false);
           }, 420);
         }
       }
     },
-    [pin, mode, correctPin, onUnlock, onResetPin]
+    [pin, mode, correctPin, onUnlock, onResetPin, onShowToast]
   );
 
   const handleClear = useCallback(() => {
     playRetroClick();
     setPin('');
-    setError('');
+    setPinError(false);
   }, []);
 
   const handleDelete = useCallback(() => {
     if (pin.length === 0) return;
     playRetroClick();
     setPin((prev) => prev.slice(0, -1));
-    setError('');
+    setPinError(false);
   }, [pin.length]);
 
   // Allow typing digits and Backspace on physical keyboard
@@ -163,8 +167,8 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
         : (userEmail || '').trim().toLowerCase();
 
     if (!cleanInput) {
-      setAnswerError('Please enter your answer to continue.');
       playRetroBeep();
+      onShowToast?.('Please enter your answer to continue!', 'error');
       return;
     }
 
@@ -173,13 +177,12 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
       cleanInput !== expectedAnswer &&
       cleanInput !== (userEmail || '').trim().toLowerCase()
     ) {
-      setAnswerError('Answer does not match. You can also enter your account email.');
       playRetroBeep();
+      onShowToast?.('Answer mismatch. Try your account email!', 'error');
       return;
     }
 
     playRetroClick();
-    setAnswerError('');
     setPin('');
     setMode('set-new-pin');
   };
@@ -247,19 +250,11 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
                 <input
                   type="text"
                   value={answerInput}
-                  onChange={(e) => {
-                    setAnswerInput(e.target.value);
-                    setAnswerError('');
-                  }}
+                  onChange={(e) => setAnswerInput(e.target.value)}
                   placeholder="Enter your answer..."
                   autoFocus
                   className="w-full h-10 px-3.5 rounded-xl bg-white/[0.03] border border-white/[0.08] focus:border-[#ff9000] text-xs text-white placeholder:text-zinc-500 outline-none transition-all"
                 />
-                {answerError && (
-                  <p className="text-[11px] text-red-400 font-medium mt-1.5 text-center">
-                    {answerError}
-                  </p>
-                )}
               </div>
 
               <button
@@ -286,7 +281,6 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
               onClick={() => {
                 playRetroClick();
                 setMode('unlock');
-                setAnswerError('');
               }}
               className="mt-4 text-[11px] text-zinc-400 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer"
             >
@@ -314,7 +308,7 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
                   <div
                     key={i}
                     className={`w-3.5 h-3.5 rounded-full flex items-center justify-center text-[9px] font-bold transition-colors duration-150 ${
-                      error
+                      pinError
                         ? 'bg-red-500 border border-red-400 text-white'
                         : isFilled
                           ? 'bg-[#ff9000] border border-[#ff9000] text-black'
@@ -336,8 +330,6 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
               {showNumbers ? <EyeOff size={12} /> : <Eye size={12} />}
               <span>{showNumbers ? 'Hide numbers' : 'Show numbers'}</span>
             </button>
-
-            {error && <p className="text-[11px] text-red-400 font-semibold mb-2.5">{error}</p>}
 
             {/* Compact 3x4 Subtle Glass Keypad Grid */}
             <div className="grid grid-cols-3 gap-2 w-full max-w-[240px]">
@@ -400,7 +392,7 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
                 type="button"
                 onClick={() => {
                   playRetroClick();
-                  setError('');
+                  setPinError(false);
                   setPin('');
                   setMode('security-question');
                 }}

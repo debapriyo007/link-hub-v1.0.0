@@ -1577,6 +1577,7 @@ export default function App() {
         <LoginPage
           onOpenScanQr={() => setIsScanQrOpen(true)}
           pendingSharedSummary={pendingSharedSummary}
+          onShowToast={showToast}
         />
 
         {isScanQrOpen && (
@@ -1605,19 +1606,29 @@ export default function App() {
   // 3. Session PIN Lock Screen when Locked
   if (isLocked) {
     return (
-      <LockedScreen
-        onUnlock={() => setIsLocked(false)}
-        hasPin={Boolean(userProfile.pin)}
-        correctPin={userProfile.pin || null}
-        userEmail={userProfile.email}
-        userName={userProfile.displayName}
-        securityQuestion={userProfile.securityQuestion}
-        securityAnswer={userProfile.securityAnswer}
-        onResetPin={async (newPin) => {
-          await handleSavePin(newPin);
-          setIsLocked(false);
-        }}
-      />
+      <>
+        <LockedScreen
+          onUnlock={() => setIsLocked(false)}
+          hasPin={Boolean(userProfile.pin)}
+          correctPin={userProfile.pin || null}
+          userEmail={userProfile.email}
+          userName={userProfile.displayName}
+          securityQuestion={userProfile.securityQuestion}
+          securityAnswer={userProfile.securityAnswer}
+          onResetPin={async (newPin) => {
+            await handleSavePin(newPin);
+            setIsLocked(false);
+          }}
+          onShowToast={showToast}
+        />
+
+        <Toast
+          toast={toast}
+          onDismiss={dismissToast}
+          onPause={pauseToast}
+          onResume={resumeToast}
+        />
+      </>
     );
   }
 
