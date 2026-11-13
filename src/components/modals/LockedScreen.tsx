@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Unlock, Eye, EyeOff, Delete, ArrowLeft, KeyRound } from 'lucide-react';
+import { Eye, EyeOff, Delete, ArrowLeft, KeyRound } from 'lucide-react';
+import { BsPersonLock } from 'react-icons/bs';
 import { playRetroClick, playRetroBeep, playRetroUnlockChime } from '../../utils/sound.ts';
 import { LinkHubLogo } from '../LinkHubLogo.tsx';
 
@@ -210,10 +211,12 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
         {/* Refined Industry-Standard Dark Glass Lock Card (Zero Blur Repaint Lag) */}
         <div
           data-lock-card="true"
-          className="w-full max-w-[330px] rounded-2xl bg-[#121318]/96 border border-white/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.08)] px-5 py-6 flex flex-col items-center text-center relative z-10 overflow-hidden"
+          className={`w-full rounded-2xl bg-[#121318]/96 border border-white/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.08)] flex flex-col items-center text-center relative z-10 overflow-hidden ${
+            !hasPin && mode === 'unlock' ? 'max-w-[360px] px-6 py-8' : 'max-w-[330px] px-5 py-6'
+          }`}
         >
           {/* Raw LINKHUB Site Logo */}
-          <div className="mb-4">
+          <div className={!hasPin && mode === 'unlock' ? 'mb-6' : 'mb-4'}>
             <LinkHubLogo size="md" />
           </div>
 
@@ -410,34 +413,46 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
         ) : (
           /* Mode 3: Session Locked without a PIN set */
           <div className="w-full flex flex-col items-center">
-            <h1 className="font-title font-bold text-base sm:text-lg text-white tracking-tight mb-1">
+            {/* Clean Minimalist Person Lock Icon */}
+            <div className="my-3 flex items-center justify-center">
+              <BsPersonLock
+                size={42}
+                aria-hidden="true"
+                className="text-[#ff9000] drop-shadow-[0_0_18px_rgba(255,144,0,0.35)]"
+              />
+            </div>
+
+            <h1 className="font-title font-bold text-lg sm:text-xl text-white tracking-tight mt-2 mb-2">
               Vault Session Locked
             </h1>
-            <p className="text-[11px] text-zinc-300 mb-5">
-              Your session was automatically locked when switching tabs
+            <p className="text-xs text-zinc-400 leading-relaxed max-w-[260px] mb-7">
+              Your session was automatically locked when switching tabs.
             </p>
-            <button
-              type="button"
-              onClick={() => {
-                playRetroUnlockChime();
-                onUnlock();
-              }}
-              className="w-full h-10 rounded-xl bg-[#ff9000] hover:bg-[#ffa31a] active:scale-95 text-black font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-[0_8px_20px_rgba(255,144,0,0.3)] transition-all cursor-pointer"
-            >
-              <Unlock size={14} />
-              <span>Unlock Vault</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                playRetroClick();
-                setPin('');
-                setMode('set-new-pin');
-              }}
-              className="mt-3 text-[11px] text-zinc-300 hover:text-[#ff9000] transition-colors cursor-pointer"
-            >
-              Set a 6-digit Security PIN
-            </button>
+
+            <div className="w-full space-y-3">
+              <button
+                type="button"
+                onClick={() => {
+                  playRetroUnlockChime();
+                  onUnlock();
+                }}
+                className="w-full h-11 rounded-xl bg-[#ff9000] hover:bg-[#ffa31a] active:scale-[0.98] text-black font-bold text-xs uppercase tracking-wider flex items-center justify-center shadow-[0_10px_24px_rgba(255,144,0,0.28)] transition-all cursor-pointer"
+              >
+                <span>Unlock Vault</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  playRetroClick();
+                  setPin('');
+                  setMode('set-new-pin');
+                }}
+                className="w-full h-10 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] text-zinc-300 hover:text-white text-xs font-medium flex items-center justify-center transition-colors cursor-pointer"
+              >
+                <span>Set 6-Digit Security PIN</span>
+              </button>
+            </div>
           </div>
         )}
         </div>
