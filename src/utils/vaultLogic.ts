@@ -1,4 +1,4 @@
-import { LinkItem, SortOption } from '../types.ts';
+import type { LinkItem, SortOption } from '../types.ts';
 
 export function normalizeUrl(rawUrl: string): string {
   let url = (rawUrl || '').trim();
@@ -22,8 +22,55 @@ export function extractDomain(rawUrl: string): string {
 
 export function getFaviconUrl(rawUrl: string): string {
   const domain = extractDomain(rawUrl);
-  if (!domain) return '';
+  if (!domain || domain === 'encrypted.linkhub.vault') return '';
   return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=128`;
+}
+
+export function getFaviconCandidates(rawUrl: string, explicitFaviconUrl?: string): string[] {
+  const candidates: string[] = [];
+  const pushUnique = (u: string) => {
+    if (u && !candidates.includes(u)) candidates.push(u);
+  };
+
+  const trimmedRaw = (rawUrl || '').trim();
+  if (
+    !trimmedRaw ||
+    trimmedRaw.startsWith('https://encrypted.linkhub.vault') ||
+    trimmedRaw.startsWith('ENC1:') ||
+    trimmedRaw.startsWith('ENC2:')
+  ) {
+    return [];
+  }
+
+  if (explicitFaviconUrl && /^https?:\/\//i.test(explicitFaviconUrl.trim())) {
+    const cleanExplicit = explicitFaviconUrl.trim();
+    if (!cleanExplicit.startsWith('https://encrypted.linkhub.vault')) {
+      pushUnique(cleanExplicit);
+    }
+  }
+
+  try {
+    const parsed = new URL(normalizeUrl(trimmedRaw));
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return candidates;
+    }
+    const hostname = parsed.hostname.replace(/^www\./i, '').toLowerCase();
+    if (!hostname || hostname === 'encrypted.linkhub.vault') {
+      return candidates;
+    }
+
+    pushUnique(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(hostname)}&sz=128`);
+    pushUnique(`https://icons.duckduckgo.com/ip3/${encodeURIComponent(hostname)}.ico`);
+    pushUnique(`${parsed.origin}/favicon.ico`);
+  } catch {
+    const domain = extractDomain(trimmedRaw);
+    if (domain && domain !== 'encrypted.linkhub.vault') {
+      pushUnique(`https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=128`);
+      pushUnique(`https://icons.duckduckgo.com/ip3/${encodeURIComponent(domain)}.ico`);
+    }
+  }
+
+  return candidates;
 }
 
 export function generateQuickCode(url: string): string {

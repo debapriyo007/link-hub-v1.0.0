@@ -2,19 +2,21 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { Eye, EyeOff, Delete, X } from 'lucide-react';
 import { Category } from '../../types.ts';
 import { formatCategoryName } from '../../utils/vaultLogic.ts';
-import { verifyPrivateCategoryPin } from '../../utils/privateVaultCrypto.ts';
+import { verifyPrivateCategoryPinAsync } from '../../utils/privateVaultCrypto.ts';
 import { playRetroClick, playRetroBeep, playRetroUnlockChime } from '../../utils/sound.ts';
 import { CategoryIcon } from '../CategoryIcon.tsx';
 
 interface PrivateCategoryPinModalProps {
   isOpen: boolean;
+  userId: string;
   category: Category | null;
   onClose: () => void;
-  onUnlockSuccess: (category: Category, enteredPin: string) => void;
+  onUnlockSuccess: (category: Category, enteredPin: string) => Promise<void> | void;
 }
 
 export const PrivateCategoryPinModal: React.FC<PrivateCategoryPinModalProps> = ({
   isOpen,
+  userId,
   category,
   onClose,
   onUnlockSuccess,
@@ -22,63 +24,71 @@ export const PrivateCategoryPinModal: React.FC<PrivateCategoryPinModalProps> = (
   const [pin, setPin] = useState('');
   const [showNumbers, setShowNumbers] = useState(false);
   const [error, setError] = useState('');
+  const [verifying, setVerifying] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setPin('');
       setError('');
       setShowNumbers(false);
+      setVerifying(false);
     }
   }, [isOpen, category?.id]);
 
   const handleDigit = useCallback(
-    (digit: string) => {
-      if (!category || pin.length >= 6) return;
+    async (digit: string) => {
+      if (!category || verifying || pin.length >= 6) return;
       playRetroClick();
       const nextPin = pin + digit;
       setPin(nextPin);
       setError('');
 
       if (nextPin.length === 6) {
-        const isValid = verifyPrivateCategoryPin(
-          nextPin,
-          category.slug,
-          category.privatePinHash
-        );
-        if (isValid) {
-          playRetroUnlockChime();
-          onUnlockSuccess(category, nextPin);
-        } else {
+        setVerifying(true);
+        try {
+          const isValid = await verifyPrivateCategoryPinAsync(nextPin, category, userId);
+          if (isValid) {
+            playRetroUnlockChime();
+            await onUnlockSuccess(category, nextPin);
+          } else {
+            playRetroBeep();
+            setError('Incorrect private security code. Try again.');
+            setTimeout(() => {
+              setPin('');
+            }, 380);
+          }
+        } catch {
           playRetroBeep();
-          setError('Incorrect private security code. Try again.');
-          setTimeout(() => {
-            setPin('');
-          }, 420);
+          setError('Could not verify private vault code.');
+          setPin('');
+        } finally {
+          setVerifying(false);
         }
       }
     },
-    [pin, category, onUnlockSuccess]
+    [pin, category, userId, verifying, onUnlockSuccess]
   );
 
   const handleClear = useCallback(() => {
+    if (verifying) return;
     playRetroClick();
     setPin('');
     setError('');
-  }, []);
+  }, [verifying]);
 
   const handleDelete = useCallback(() => {
-    if (pin.length === 0) return;
+    if (verifying || pin.length === 0) return;
     playRetroClick();
     setPin((prev) => prev.slice(0, -1));
     setError('');
-  }, [pin.length]);
+  }, [pin.length, verifying]);
 
   useEffect(() => {
     if (!isOpen || !category) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (/^[0-9]$/.test(e.key)) {
         e.preventDefault();
-        handleDigit(e.key);
+        void handleDigit(e.key);
       } else if (e.key === 'Backspace') {
         e.preventDefault();
         handleDelete();
@@ -133,7 +143,9 @@ export const PrivateCategoryPinModal: React.FC<PrivateCategoryPinModalProps> = (
           Private Category Locked
         </h2>
         <p className="text-[11px] text-zinc-400 mt-0.5 mb-4">
-          Enter 6-digit private security code to decrypt links
+          {verifying
+            ? 'Deriving key & decrypting vault...'
+            : 'Enter 6-digit private security code to decrypt links'}
         </p>
 
         {/* 6 Compact Circular Passcode Dots (No Glow Effect) */}

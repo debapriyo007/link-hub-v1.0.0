@@ -111,10 +111,12 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
     const cleanName = formatCategoryName(rawTrimmed);
 
     const cleanPin = privatePin.replace(/\D/g, '');
-    const hasExistingPinHash = Boolean(category?.isPrivate && category?.privatePinHash);
+    const hasExistingPin = Boolean(
+      category?.isPrivate && (category?.privateVaultMeta || category?.privatePinHash)
+    );
 
     if (isPrivate) {
-      if (!hasExistingPinHash && cleanPin.length !== 6) {
+      if (!hasExistingPin && cleanPin.length !== 6) {
         setPinError('Enter a 6-digit numeric security code for this private category.');
         playRetroBeep();
         return;
@@ -143,6 +145,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
       description: description.trim(),
       isPrivate,
       privatePin: isPrivate && cleanPin.length === 6 ? cleanPin : undefined,
+      privateVaultMeta: isPrivate ? category?.privateVaultMeta : '',
       privatePinHash: isPrivate ? category?.privatePinHash : '',
     });
     onClose();

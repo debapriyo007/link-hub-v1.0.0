@@ -148,11 +148,11 @@ test('encodeCategorySharePayload and decodeCategoryShareInput round-trip via sha
   assert.equal(fromToken.shortCode, shareCode);
 });
 
-test('encodeCategoryForStorage and decodeCategoryFromStorage encrypt private category fields and verify PIN', async () => {
+test('encodeCategoryForStorageAsync and verifyPrivateCategoryPinAsync store v2 wrapped vaults cleanly', async () => {
   const {
-    encodeCategoryForStorage,
+    encodeCategoryForStorageAsync,
     decodeCategoryFromStorage,
-    verifyPrivateCategoryPin,
+    verifyPrivateCategoryPinAsync,
   } = await import('./privateVaultCrypto.ts');
 
   const rawCat = {
@@ -166,43 +166,39 @@ test('encodeCategoryForStorage and decodeCategoryFromStorage encrypt private cat
     privatePin: '482910',
   };
 
-  const encoded = encodeCategoryForStorage(rawCat, 'user_123');
-  assert.ok(encoded.name.startsWith('ENC1:'));
-  assert.ok(encoded.description?.startsWith('LHPRIV1:'));
-  assert.notEqual(encoded.name, 'Secret Banking');
+  const encoded = await encodeCategoryForStorageAsync(rawCat, 'user_123');
+  assert.ok(encoded.privateVaultMeta.startsWith('LHPRIV2:'));
+  assert.equal(encoded.description, '[Encrypted Private Vault]');
 
   const decoded = decodeCategoryFromStorage(encoded, 'user_123');
   assert.equal(decoded.isPrivate, true);
-  assert.equal(decoded.name, 'Secret Banking');
-  assert.equal(decoded.description, 'Confidential financial portals');
-  assert.equal(verifyPrivateCategoryPin('482910', decoded.slug, decoded.privatePinHash), true);
-  assert.equal(verifyPrivateCategoryPin('000000', decoded.slug, decoded.privatePinHash), false);
+  assert.equal(await verifyPrivateCategoryPinAsync('482910', decoded, 'user_123'), true);
+  assert.equal(await verifyPrivateCategoryPinAsync('000000', decoded, 'user_123'), false);
 });
 
-test('encryptLinkForStorage and decryptLinkInMemory encrypt private links and mask until unlocked', async () => {
+test('encryptLinkForStorageAsync and decryptLinkInMemoryAsync use AES-256-GCM and mask until unlocked', async () => {
   const {
-    encodeCategoryForStorage,
-    decodeCategoryFromStorage,
-    encryptLinkForStorage,
-    decryptLinkInMemory,
+    encodeCategoryForStorageAsync,
+    unlockAndStoreCategoryDek,
+    encryptLinkForStorageAsync,
+    decryptLinkInMemoryAsync,
     isLinkEncrypted,
   } = await import('./privateVaultCrypto.ts');
 
-  const decodedPrivateCat = decodeCategoryFromStorage(
-    encodeCategoryForStorage(
-      {
-        id: 'cat_secret',
-        name: 'Secret Banking',
-        slug: 'secret-banking',
-        icon: 'lock',
-        color: '#ff9000',
-        isPrivate: true,
-        privatePin: '482910',
-      },
-      'user_123'
-    ),
+  const encodedPrivateCat = await encodeCategoryForStorageAsync(
+    {
+      id: 'cat_secret',
+      name: 'Secret Banking',
+      slug: 'secret-banking',
+      icon: 'lock',
+      color: '#ff9000',
+      isPrivate: true,
+      privatePin: '482910',
+    },
     'user_123'
   );
+
+  await unlockAndStoreCategoryDek('user_123', encodedPrivateCat, '482910');
 
   const privateLink: LinkItem = {
     id: 'priv_1',
@@ -219,17 +215,21 @@ test('encryptLinkForStorage and decryptLinkInMemory encrypt private links and ma
     updatedAt: 5000,
   };
 
-  const encrypted = encryptLinkForStorage(privateLink, decodedPrivateCat) as LinkItem;
+  const encrypted = (await encryptLinkForStorageAsync(
+    privateLink,
+    'user_123',
+    encodedPrivateCat
+  )) as LinkItem;
   assert.equal(isLinkEncrypted(encrypted), true);
-  assert.ok(encrypted.title.startsWith('ENC1:'));
-  assert.ok(encrypted.url.startsWith('https://encrypted.linkhub.vault/ENC1:'));
-  assert.ok(encrypted.description.startsWith('ENC1:'));
+  assert.ok(encrypted.title.startsWith('ENC2:'));
+  assert.ok(encrypted.url.startsWith('https://encrypted.linkhub.vault/ENC2:'));
+  assert.ok(encrypted.description.startsWith('ENC2:'));
 
-  const lockedView = decryptLinkInMemory(encrypted, decodedPrivateCat, false);
+  const lockedView = await decryptLinkInMemoryAsync(encrypted, 'user_123', encodedPrivateCat, false);
   assert.equal(lockedView.title, 'Encrypted Private Link');
   assert.equal(lockedView.url, 'https://encrypted.linkhub.vault');
 
-  const unlockedView = decryptLinkInMemory(encrypted, decodedPrivateCat, true);
+  const unlockedView = await decryptLinkInMemoryAsync(encrypted, 'user_123', encodedPrivateCat, true);
   assert.equal(unlockedView.title, 'Swiss Vault Account');
   assert.equal(unlockedView.url, 'https://vault.example.ch/login');
   assert.equal(unlockedView.description, 'Private key recovery portal');
@@ -287,6 +287,21 @@ test('formatCategoryName normalizes all-caps category names to standard case', a
   assert.equal(formatCategoryName('GAMING'), 'Gaming');
   assert.equal(formatCategoryName('SECRET VAULT'), 'Secret Vault');
   assert.equal(formatCategoryName('18+'), '18+');
+});
+
+test('getFaviconCandidates generates real site favicon fallback URLs and skips encrypted placeholders', async () => {
+  const { getFaviconCandidates } = await import('./vaultLogic.ts');
+  const githubIcons = getFaviconCandidates('https://github.com/torvalds/linux');
+  assert.equal(githubIcons[0], 'https://www.google.com/s2/favicons?domain=github.com&sz=128');
+  assert.equal(githubIcons[1], 'https://icons.duckduckgo.com/ip3/github.com.ico');
+  assert.equal(githubIcons[2], 'https://github.com/favicon.ico');
+
+  const withExplicit = getFaviconCandidates('https://figma.com', 'https://static.figma.com/app/icon/1/favicon.png');
+  assert.equal(withExplicit[0], 'https://static.figma.com/app/icon/1/favicon.png');
+  assert.equal(withExplicit[1], 'https://www.google.com/s2/favicons?domain=figma.com&sz=128');
+
+  assert.deepEqual(getFaviconCandidates('https://encrypted.linkhub.vault'), []);
+  assert.deepEqual(getFaviconCandidates('https://encrypted.linkhub.vault/ENC2:abc'), []);
 });
 
 

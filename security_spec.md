@@ -1,37 +1,36 @@
-# LINKHUB Cloud Vault — Firestore Security Specification (`security_spec.md`)
+# LINKHUB Cloud Vault v2.0.0 — Security Specification (`security_spec.md`)
 
 ## 1. Data Invariants & Master Source of Truth
 
 1. **Master Gate & Tenant Isolation**:
    - `/users/{userId}` is the root identity document for each authenticated user.
-   - All bookmarks (`/users/{userId}/links/{linkId}`) and categories (`/users/{userId}/categories/{categoryId}`) are subcollections owned exclusively by `{userId}`.
-   - A `Category` or `LinkItem` cannot be created or updated unless the parent `/users/{userId}` document exists (`exists(/databases/$(database)/documents/users/$(userId))`) and `request.auth.uid == userId`.
-2. **Verified Identity**:
-   - Every read and write requires `request.auth != null` and `request.auth.token.email_verified == true`.
-   - PII in `/users/{userId}` (`email`, `displayName`, `photoURL`, `pin`) is strictly isolated to `request.auth.uid == userId`.
-3. **Strict Schema, Key Allowlisting & Volumetric Bounds**:
-   - Every entity enforces exact `keys().hasAll(...)` and `keys().hasOnly(...)` on `create`, and action-scoped `incoming().diff(existing()).affectedKeys().hasOnly(...)` on `update`.
-   - Every string field enforces `.size()` limits matching `firebase-blueprint.json`.
-   - Every ID/slug field matches `^[a-zA-Z0-9_\-]+$` with length `<= 128` (or `<= 60` for slugs).
-   - `tags` array in `LinkItem` is bounded to `size() <= 10` and validates element type/length on index 0 when non-empty.
-4. **Temporal & Identity Immutability**:
-   - `createdAt` must equal `request.time` on `create` and is immutable (`incoming().createdAt == existing().createdAt`) on `update`.
-   - `updatedAt` must equal `request.time` on both `create` and `update`.
-   - `uid` / `userId` and `id` are immutable after creation.
+   - All bookmarks (`/users/{userId}/links/{linkId}`), categories (`/users/{userId}/categories/{categoryId}`), preferences (`/users/{userId}/preferences/{prefId}`), and server-managed entitlements (`/users/{userId}/entitlements/{entitlementId}`) are strictly scoped to `{userId}`.
+   - Subcollections require `exists(/databases/$(database)/documents/users/$(userId))` and `request.auth.uid == userId`.
+2. **Verified Identity Across All Providers**:
+   - Every read and write in Firestore and every authenticated `/api/*` endpoint requires `request.auth != null` and `request.auth.token.email_verified == true`.
+   - Password-provider accounts without verified emails are blocked at UI login, Firestore Rules, and backend Express middleware.
+3. **Privilege-Escalation & Billing Protection**:
+   - Client-writable documents explicitly forbid reserved entitlement/role fields (`role`, `roles`, `isAdmin`, `admin`, `isPremium`, `premium`, `subscription`, `plan`, `tier`, `billingStatus`, `entitlements`, `stripeCustomerId`).
+   - `/users/{userId}/entitlements/{entitlementId}` permits owner reads (`get`, `list`) only; `create`, `update`, and `delete` are denied (`if false`) to clients and mutated strictly via Firebase Admin SDK.
+4. **Strict Schema, Key Allowlisting & Volumetric Bounds**:
+   - Every entity enforces `keys().hasAll(...)` and `keys().hasOnly(...)` on create, and field-scoped `affectedKeys().hasOnly(...)` on update, synchronized with `firebase-blueprint.json`.
+   - `url`, `imageUrl`, and `faviconUrl` must match `^https?://.*` (or empty string where optional).
+   - `pin` stays empty (`""`) on v2 accounts; PIN verification uses `pinVerifier` (`PBKDF2_SHA256:...`).
+5. **High-Entropy Revocable Shares (`/shares/{shareId}`)**:
+   - Share IDs require `>= 22` URL-safe characters (`lh2_...`).
+   - Direct client reads of non-owned shares are permitted only when `revoked == false && hasPassword == false && expiresAt > request.time`. Password-protected shares store hashes in backend-only `shareSecrets/{shareId}` (denied to all clients by default-deny catch-all) and redeem exclusively via `/api/shares/:token/resolve`.
 
 ---
 
-## 2. The "Dirty Dozen" Adversarial Payloads
+## 2. Adversarial Security Test Matrix
 
-1. **Payload 1 (Unauthenticated Write)**: `auth = null`, creating `/users/user_1` -> `PERMISSION_DENIED`.
-2. **Payload 2 (Unverified Email Spoof)**: `auth = { uid: 'user_1', token: { email_verified: false } }`, creating `/users/user_1` -> `PERMISSION_DENIED`.
-3. **Payload 3 (Cross-Tenant PII Read)**: `auth = { uid: 'attacker_1', token: { email_verified: true } }`, reading `/users/victim_1` -> `PERMISSION_DENIED`.
-4. **Payload 4 (Identity Spoofing on Create)**: Creating `/users/user_1/links/link_1` with `userId: 'other_user'` -> `PERMISSION_DENIED`.
-5. **Payload 5 (Orphaned Subcollection Write)**: Creating `/users/user_no_profile/links/link_1` before `/users/user_no_profile` exists -> `PERMISSION_DENIED`.
-6. **Payload 6 (Shadow Field Injection on Create)**: Creating `/users/user_1/links/link_1` with an undeclared field `isAdmin: true` -> `PERMISSION_DENIED`.
-7. **Payload 7 (Shadow Field Injection on Update)**: Updating `/users/user_1/links/link_1` with an undeclared field `role: 'admin'` -> `PERMISSION_DENIED`.
-8. **Payload 8 (Immortal Field Mutation)**: Updating `/users/user_1/links/link_1` by modifying `createdAt` or `userId` -> `PERMISSION_DENIED`.
-9. **Payload 9 (Client Timestamp Forgery)**: Creating `/users/user_1/links/link_1` with a forged past/future timestamp instead of `request.time` -> `PERMISSION_DENIED`.
-10. **Payload 10 (Resource Exhaustion / Oversized String)**: Updating `/users/user_1/links/link_1` with a 5,000-character `title` (exceeds `maxLength: 160`) -> `PERMISSION_DENIED`.
-11. **Payload 11 (Unbounded Array Injection)**: Creating `/users/user_1/links/link_1` with 25 tags (exceeds `size() <= 10`) -> `PERMISSION_DENIED`.
-12. **Payload 12 (Invalid PIN Format Injection)**: Updating `/users/user_1` with `pin: '12345a'` (violates `^([0-9]{6})?$`) -> `PERMISSION_DENIED`.
+1. **Unauthenticated Write**: `auth = null` creating `/users/user_1` -> `PERMISSION_DENIED`.
+2. **Unverified Email Bypass**: `email_verified: false` creating `/users/user_1` or calling `/api/*` -> `PERMISSION_DENIED` / `403`.
+3. **Cross-Tenant Read**: `attacker_1` reading `/users/victim_1` or subcollections -> `PERMISSION_DENIED`.
+4. **Privilege Injection**: Creating/updating any user document with `isAdmin: true`, `plan: 'pro'`, or `role: 'admin'` -> `PERMISSION_DENIED`.
+5. **Entitlement Tampering**: Owner attempting write to `/users/user_1/entitlements/default` -> `PERMISSION_DENIED`.
+6. **Immutability Violation**: Mutating `createdAt`, `uid`, `userId`, or `id` -> `PERMISSION_DENIED`.
+7. **Dangerous URI Injection**: Creating `LinkItem` with `javascript:alert(1)` or `data:text/html` URL -> `PERMISSION_DENIED`.
+8. **Invalid Share Enumeration**: Guessing short share ID (`"123456"`) or reading expired/revoked share -> `PERMISSION_DENIED` / `400` / `410`.
+9. **SSRF & DNS Rebinding**: Fetching `127.0.0.1`, `169.254.169.254`, `::ffff:127.0.0.1`, obfuscated integers, or redirecting to metadata endpoints -> `403`.
+10. **Cryptographic AAD / Ciphertext Tampering**: Moving AES-256-GCM ciphertext across `linkId`, `userId`, or `fieldName`, or modifying a byte -> GCM authentication failure.

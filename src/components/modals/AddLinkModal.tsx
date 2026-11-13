@@ -8,7 +8,13 @@ import {
   Loader2,
 } from 'lucide-react';
 import { LinkItem, Category } from '../../types.ts';
-import { normalizeUrl, extractDomain, formatCategoryName } from '../../utils/vaultLogic.ts';
+import { getSecurityHeaders, sanitizeHttpUrl } from '../../firebase.ts';
+import {
+  normalizeUrl,
+  extractDomain,
+  formatCategoryName,
+  getFaviconUrl,
+} from '../../utils/vaultLogic.ts';
 import { playRetroClick, playRetroBeep, playRetroUnlockChime } from '../../utils/sound.ts';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal.tsx';
 import { Button } from '../ui/Button.tsx';
@@ -99,9 +105,13 @@ export const AddLinkModal: React.FC<AddLinkModalProps> = ({
     setIsAiGenerating(true);
 
     try {
+      const secHeaders = await getSecurityHeaders();
       const response = await fetch('/api/ai/link-metadata', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...secHeaders,
+        },
         body: JSON.stringify({
           url: cleanUrl,
           categories: categories.map((c) => ({ slug: c.slug, name: c.name })),
@@ -129,6 +139,13 @@ export const AddLinkModal: React.FC<AddLinkModalProps> = ({
           setCategorySlug(data.suggestedCategorySlug);
         }
         playRetroUnlockChime();
+        return;
+      }
+
+      if (response.status === 400 || response.status === 403 || response.status === 429) {
+        const errPayload = await response.json().catch(() => ({}));
+        setError(errPayload.error || 'Could not analyze that URL right now.');
+        playRetroBeep();
         return;
       }
     } catch {
@@ -165,26 +182,40 @@ export const AddLinkModal: React.FC<AddLinkModalProps> = ({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const cleanUrl = normalizeUrl(url);
-    if (!cleanUrl) {
-      setError('Please provide a valid URL.');
+    if (!cleanUrl || !/^https?:\/\//i.test(cleanUrl)) {
+      setError('Please provide a valid HTTP or HTTPS URL.');
       playRetroBeep();
       return;
     }
+
+    const rawImg = imageUrl.trim();
+    const safeImageUrl =
+      rawImg && /^https?:\/\//i.test(rawImg) ? sanitizeHttpUrl(rawImg, '', 2048) : '';
 
     const cleanTitle = title.trim() || extractDomain(cleanUrl) || cleanUrl;
     const pendingTag = currentTag.trim().toLowerCase().replace(/^#/, '');
     const finalTags =
       pendingTag && !tags.includes(pendingTag) ? [...tags, pendingTag] : tags;
 
+    const sanitizedTargetUrl = sanitizeHttpUrl(cleanUrl);
+    const shouldRefreshFavicon =
+      !initialLink ||
+      normalizeUrl(initialLink.url || '') !== cleanUrl ||
+      !initialLink.faviconUrl;
+    const resolvedFaviconUrl = shouldRefreshFavicon
+      ? getFaviconUrl(sanitizedTargetUrl)
+      : initialLink.faviconUrl;
+
     playRetroClick();
     onSave({
-      url: cleanUrl,
+      url: sanitizedTargetUrl,
       title: cleanTitle,
       categorySlug: categorySlug || categories[0]?.slug || 'study',
       description: description.trim(),
       tags: finalTags,
       isFavorite,
-      imageUrl: imageUrl.trim() || '',
+      imageUrl: safeImageUrl,
+      faviconUrl: resolvedFaviconUrl,
     });
     onClose();
   };

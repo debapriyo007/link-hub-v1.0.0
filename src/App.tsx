@@ -21,15 +21,30 @@ import { LinkItem, Category, SortOption, UserProfile } from './types.ts';
 import { INITIAL_LINKS, INITIAL_CATEGORIES } from './data/initialData.ts';
 import { filterAndSortLinks } from './utils/vaultLogic.ts';
 import {
-  encodeCategoryForStorage,
+  encodeCategoryForStorageAsync,
   decodeCategoryFromStorage,
-  encryptLinkForStorage,
-  decryptLinkInMemory,
+  encryptLinkForStorageAsync,
+  decryptLinkInMemoryAsync,
   isLinkEncrypted,
+  maskedPrivateLink,
+  unlockAndStoreCategoryDek,
+  setActiveCategoryDek,
+  clearActiveCategoryDek,
+  clearAllActiveCategoryDeks,
 } from './utils/privateVaultCrypto.ts';
+import {
+  createSecretVerifier,
+  verifySecretVerifier,
+} from './utils/vaultCryptoV2.ts';
+import {
+  needsVaultMigration,
+  migrateLegacyCategoryToV2,
+  clearMigrationCheckpoint,
+} from './utils/vaultMigration.ts';
 import {
   SharedCategoryBundle,
   decodeCategoryShareInput,
+  extractServerShareToken,
   savePendingSharedImport,
   consumePendingSharedImport,
   peekPendingSharedImport,
@@ -38,10 +53,12 @@ import {
   playRetroClick,
   playRetroBeep,
   playRetroLock,
+  setSoundEnabled,
 } from './utils/sound.ts';
 import {
   auth,
   db,
+  googleProvider,
   doc,
   getDoc,
   setDoc,
@@ -53,12 +70,21 @@ import {
   writeBatch,
   firebaseSignOut,
   onAuthStateChanged,
+  sendEmailVerification,
+  deleteUser,
+  reload,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
+  reauthenticateWithPopup,
   sanitizeId,
   sanitizePin,
   sanitizeUserProfileCreate,
+  sanitizePreferencesCreate,
+  sanitizePreferencesUpdate,
   sanitizeCategoryCreate,
   sanitizeLinkCreate,
   toMillis,
+  type FirebaseUser,
 } from './firebase.ts';
 
 // UI Components
@@ -71,6 +97,7 @@ import { GlassSelect } from './components/ui/GlassSelect.tsx';
 import { Toast, ToastData, ToastVariant } from './components/ui/Toast.tsx';
 import { LinkHubLogo } from './components/LinkHubLogo.tsx';
 import { LoginPage } from './components/LoginPage.tsx';
+import { EmailVerificationScreen } from './components/EmailVerificationScreen.tsx';
 import { ProfileSettingsPage } from './components/ProfileSettingsPage.tsx';
 
 // Modals
@@ -102,6 +129,7 @@ const XBrandIcon: React.FC<{ size?: number }> = ({ size = 13 }) => (
 declare global {
   interface Window {
     __LINKHUB_E2E_LOGIN__?: (profile?: Partial<UserProfile>) => void;
+    __LINKHUB_E2E_PENDING_VERIFY__?: (email?: string) => void;
     __LINKHUB_E2E_LOGOUT__?: () => void;
   }
 }
@@ -109,12 +137,17 @@ declare global {
 export default function App() {
   // Authentication & Firestore State
   const [authReady, setAuthReady] = useState<boolean>(false);
+  const [pendingVerificationUser, setPendingVerificationUser] = useState<FirebaseUser | null>(null);
+  const [e2ePendingVerifyEmail, setE2ePendingVerifyEmail] = useState<string | null>(null);
+  const e2eEmailVerifiedRef = useRef<boolean>(false);
   const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
   const [isE2ESession, setIsE2ESession] = useState<boolean>(false);
   const [links, setLinks] = useState<LinkItem[]>([]);
+  const [decryptedLinks, setDecryptedLinks] = useState<LinkItem[]>([]);
   const [categories, setCategories] = useState<Category[]>(INITIAL_CATEGORIES);
   const [vaultSyncing, setVaultSyncing] = useState<boolean>(false);
   const [isLocked, setIsLocked] = useState<boolean>(false);
+  const [privateUnlockVersion, setPrivateUnlockVersion] = useState<number>(0);
   const seededDefaultCatsUidRef = useRef<string | null>(null);
 
   // UI Filter & Sort State
@@ -143,6 +176,7 @@ export default function App() {
   const [shareCategorySlug, setShareCategorySlug] = useState<string>('');
   const [isScanQrOpen, setIsScanQrOpen] = useState(false);
   const [pendingSharedBundle, setPendingSharedBundle] = useState<SharedCategoryBundle | null>(null);
+  const [pendingShareToken, setPendingShareToken] = useState<string | null>(null);
   const [pendingSharedSummary, setPendingSharedSummary] = useState<{
     categoryName: string;
     linkCount: number;
@@ -219,18 +253,30 @@ export default function App() {
     document.documentElement.classList.add('dark');
     document.documentElement.classList.remove('light');
 
+    // Clear any leftover browser storage from prior passwordless email-link attempts
+    try {
+      localStorage.removeItem('linkhub_pending_signup_email');
+      sessionStorage.removeItem('linkhub_active_verify_session');
+    } catch {}
+
     try {
       const params = new URLSearchParams(window.location.search);
       const shareParam = params.get('share');
       if (shareParam) {
-        const decoded = decodeCategoryShareInput(
-          shareParam,
-          INITIAL_CATEGORIES,
-          INITIAL_LINKS
-        );
-        if (decoded && decoded.links.length > 0) {
-          setPendingSharedBundle(decoded);
+        const serverToken = extractServerShareToken(shareParam);
+        if (serverToken) {
+          setPendingShareToken(serverToken);
           setIsScanQrOpen(true);
+        } else {
+          const decoded = decodeCategoryShareInput(
+            shareParam,
+            INITIAL_CATEGORIES,
+            INITIAL_LINKS
+          );
+          if (decoded && decoded.links.length > 0) {
+            setPendingSharedBundle(decoded);
+            setIsScanQrOpen(true);
+          }
         }
         const cleanUrl = window.location.pathname + window.location.hash;
         window.history.replaceState({}, document.title, cleanUrl);
@@ -252,41 +298,77 @@ export default function App() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  // Automatically lock vault and any unlocked private categories when user switches browser tabs
+  // Automatically lock vault and wipe in-memory private category DEKs when user switches browser tabs
   useEffect(() => {
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden' && userProfile) {
+      if (
+        document.visibilityState === 'hidden' &&
+        userProfile &&
+        (userProfile.autoLockMinutes ?? 1) > 0
+      ) {
+        clearAllActiveCategoryDeks();
         setIsLocked(true);
         setUnlockedPrivateSlugs(new Set());
+        setPrivateUnlockVersion((v) => v + 1);
       }
     };
     document.addEventListener('visibilitychange', handleVisibilityChange);
     return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
   }, [userProfile]);
 
-  // Expose E2E test session helper for automated headless verification
   useEffect(() => {
+    if (userProfile?.soundEnabled !== undefined) {
+      setSoundEnabled(userProfile.soundEnabled !== false);
+    }
+  }, [userProfile?.soundEnabled]);
+
+  // Expose E2E test session helper strictly in local dev / explicit E2E builds (never in production)
+  useEffect(() => {
+    const viteEnv = (import.meta as { env?: Record<string, string | boolean | undefined> }).env || {};
+    const allowE2E = Boolean(viteEnv.DEV || viteEnv.VITE_ENABLE_E2E_HOOK === 'true');
+    if (!allowE2E) return;
+
     window.__LINKHUB_E2E_LOGIN__ = (customProfile?: Partial<UserProfile>) => {
       setIsE2ESession(true);
+      setPendingVerificationUser(null);
+      setE2ePendingVerifyEmail(null);
+      e2eEmailVerifiedRef.current = false;
       setUserProfile({
         uid: customProfile?.uid || 'e2e_verified_user',
         email: customProfile?.email || 'debapriyo00@gmail.com',
+        emailVerified: true,
         displayName: customProfile?.displayName || 'Debu Vault Admin',
         photoURL: customProfile?.photoURL || '',
         pin: customProfile?.pin || '',
+        pinVerifier: customProfile?.pinVerifier || '',
+        vaultVersion: 2,
       });
       setCategories(INITIAL_CATEGORIES);
       setLinks(INITIAL_LINKS);
       setAuthReady(true);
     };
-    window.__LINKHUB_E2E_LOGOUT__ = () => {
+    window.__LINKHUB_E2E_PENDING_VERIFY__ = (targetEmail = 'alex@linkhub.dev') => {
+      clearAllActiveCategoryDeks();
       setIsE2ESession(false);
+      setUserProfile(null);
+      setPendingVerificationUser(null);
+      e2eEmailVerifiedRef.current = false;
+      setE2ePendingVerifyEmail(targetEmail);
+      setAuthReady(true);
+    };
+    window.__LINKHUB_E2E_LOGOUT__ = () => {
+      clearAllActiveCategoryDeks();
+      setIsE2ESession(false);
+      setPendingVerificationUser(null);
+      setE2ePendingVerifyEmail(null);
+      e2eEmailVerifiedRef.current = false;
       setUserProfile(null);
       setCategories(INITIAL_CATEGORIES);
       setLinks([]);
     };
     return () => {
       delete window.__LINKHUB_E2E_LOGIN__;
+      delete window.__LINKHUB_E2E_PENDING_VERIFY__;
       delete window.__LINKHUB_E2E_LOGOUT__;
     };
   }, []);
@@ -323,8 +405,13 @@ export default function App() {
 
   const saveCachedCategories = useCallback((uid: string, items: Category[]) => {
     try {
-      const encoded = items.map((c) => encodeCategoryForStorage(c, uid));
-      localStorage.setItem(`linkhub_categories_${uid}`, JSON.stringify(encoded));
+      // Strip transient plaintext PIN fields before caching categories locally
+      const safeForCache = items.map((c) => {
+        const copy: Category = { ...c };
+        delete copy.privatePin;
+        return copy;
+      });
+      localStorage.setItem(`linkhub_categories_${uid}`, JSON.stringify(safeForCache));
     } catch {}
   }, []);
 
@@ -332,7 +419,12 @@ export default function App() {
     try {
       const raw = localStorage.getItem(`linkhub_profile_extras_${uid}`);
       if (!raw) return {};
-      return JSON.parse(raw);
+      const parsed = JSON.parse(raw) as Partial<UserProfile>;
+      // Strip legacy plaintext secrets if present from v1
+      delete parsed.pin;
+      delete parsed.pinVerifier;
+      delete parsed.securityAnswerHash;
+      return parsed;
     } catch {
       return {};
     }
@@ -340,7 +432,12 @@ export default function App() {
 
   const saveProfileExtras = useCallback((uid: string, extras: Partial<UserProfile>) => {
     try {
-      localStorage.setItem(`linkhub_profile_extras_${uid}`, JSON.stringify(extras));
+      const safeExtras: Partial<UserProfile> = { ...extras };
+      // Never persist PINs, verifiers, or recovery answers into localStorage
+      delete safeExtras.pin;
+      delete safeExtras.pinVerifier;
+      delete safeExtras.securityAnswerHash;
+      localStorage.setItem(`linkhub_profile_extras_${uid}`, JSON.stringify(safeExtras));
     } catch {}
   }, []);
 
@@ -364,26 +461,9 @@ export default function App() {
     }
   }, []);
 
-  // Listen to Firebase Auth state changes and hydrate immediately from cache before background Firestore sync
-  useEffect(() => {
-    const safetyTimer = window.setTimeout(() => {
-      setAuthReady(true);
-    }, 900);
-
-    const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
-      window.clearTimeout(safetyTimer);
-
-      if (!fbUser) {
-        if (!isE2ESession) {
-          setUserProfile(null);
-          setLinks([]);
-          setCategories(INITIAL_CATEGORIES);
-          setIsLocked(false);
-        }
-        setAuthReady(true);
-        return;
-      }
-
+  const hydrateVerifiedFirebaseUser = useCallback(
+    async (fbUser: FirebaseUser) => {
+      setPendingVerificationUser(null);
       setIsE2ESession(false);
       const uid = sanitizeId(fbUser.uid, 128);
       const userDocRef = doc(db, 'users', uid);
@@ -404,22 +484,21 @@ export default function App() {
       }
 
       const extras = loadProfileExtras(uid);
-      const cachedPin = typeof extras.pin === 'string' ? extras.pin : '';
       setUserProfile({
         uid,
         email: extras.email || fbUser.email || 'user@linkhub.cloud',
+        emailVerified: true,
         displayName:
           extras.displayName || fbUser.displayName || fbUser.email?.split('@')[0] || 'LINKHUB User',
         photoURL: extras.photoURL !== undefined ? extras.photoURL : fbUser.photoURL || '',
-        pin: cachedPin,
+        pin: '',
+        pinVerifier: '',
+        vaultVersion: 2,
         ...extras,
       });
-      if (cachedPin.length === 6) {
-        setIsLocked(true);
-      }
       setAuthReady(true);
 
-      // 2. Background Firestore profile sync (non-blocking)
+      // 2. Background Firestore profile + preferences sync (non-blocking)
       try {
         const snap = await getDoc(userDocRef);
         if (!snap.exists()) {
@@ -429,6 +508,8 @@ export default function App() {
             displayName: fbUser.displayName,
             photoURL: fbUser.photoURL,
             pin: '',
+            pinVerifier: '',
+            vaultVersion: 2,
           });
           if (!cachedLinks) {
             saveCachedLinks(uid, INITIAL_LINKS);
@@ -439,13 +520,16 @@ export default function App() {
         } else {
           const data = snap.data();
           const storedPin = typeof data.pin === 'string' ? data.pin : '';
+          const storedPinVerifier = typeof data.pinVerifier === 'string' ? data.pinVerifier : '';
           const latestExtras = loadProfileExtras(uid);
-          if (storedPin !== latestExtras.pin) {
-            saveProfileExtras(uid, { ...latestExtras, pin: storedPin });
-          }
-          setUserProfile({
+
+          // Scrub any legacy plaintext PIN if previously written into profile extras cache
+          saveProfileExtras(uid, latestExtras);
+
+          setUserProfile((prev) => ({
             uid,
             email: latestExtras.email || data.email || fbUser.email || 'user@linkhub.cloud',
+            emailVerified: true,
             displayName:
               latestExtras.displayName || data.displayName || fbUser.displayName || 'LINKHUB User',
             photoURL:
@@ -453,36 +537,112 @@ export default function App() {
                 ? latestExtras.photoURL
                 : data.photoURL || fbUser.photoURL || '',
             pin: storedPin,
+            pinVerifier: storedPinVerifier,
+            vaultVersion: typeof data.vaultVersion === 'number' ? data.vaultVersion : 1,
             ...latestExtras,
-          });
-          if (storedPin.length === 6 && !cachedPin) {
+            securityAnswerHash: prev?.securityAnswerHash,
+          }));
+          if (storedPinVerifier || storedPin.length === 6) {
             setIsLocked(true);
           }
+        }
+
+        // Load server-synced preferences (/users/{uid}/preferences/default)
+        try {
+          const prefSnap = await getDoc(doc(db, `users/${uid}/preferences`, 'default'));
+          if (prefSnap.exists()) {
+            const p = prefSnap.data();
+            setUserProfile((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    firstName: typeof p.firstName === 'string' ? p.firstName : prev.firstName,
+                    lastName: typeof p.lastName === 'string' ? p.lastName : prev.lastName,
+                    countryCode:
+                      typeof p.countryCode === 'string' ? p.countryCode : prev.countryCode,
+                    autoLockMinutes:
+                      typeof p.autoLockMinutes === 'number'
+                        ? p.autoLockMinutes
+                        : prev.autoLockMinutes,
+                    soundEnabled:
+                      typeof p.soundEnabled === 'boolean' ? p.soundEnabled : prev.soundEnabled,
+                    securityQuestion:
+                      typeof p.securityQuestion === 'string'
+                        ? p.securityQuestion
+                        : prev.securityQuestion,
+                    securityAnswerHash:
+                      typeof p.securityAnswerHash === 'string'
+                        ? p.securityAnswerHash
+                        : prev.securityAnswerHash,
+                  }
+                : prev
+            );
+          }
+        } catch {
+          // Non-fatal if preferences subcollection does not exist yet
         }
       } catch (error) {
         console.warn('Profile background sync warning:', error);
       } finally {
         setVaultSyncing(false);
       }
+    },
+    [
+      loadCachedLinks,
+      saveCachedLinks,
+      loadCachedCategories,
+      loadProfileExtras,
+      saveProfileExtras,
+      seedStarterVaultInFirestore,
+    ]
+  );
+
+  // Listen to Firebase Auth state changes and hydrate immediately from cache before background Firestore sync
+  useEffect(() => {
+    const safetyTimer = window.setTimeout(() => {
+      setAuthReady(true);
+    }, 900);
+
+    const unsubscribeAuth = onAuthStateChanged(auth, async (fbUser) => {
+      window.clearTimeout(safetyTimer);
+
+      if (!fbUser) {
+        clearAllActiveCategoryDeks();
+        if (!isE2ESession) {
+          setPendingVerificationUser(null);
+          setUserProfile(null);
+          setLinks([]);
+          setCategories(INITIAL_CATEGORIES);
+          setIsLocked(false);
+        }
+        setAuthReady(true);
+        return;
+      }
+
+      // Enforce Firebase verified email across all providers (no password-provider bypass)
+      if (!fbUser.emailVerified) {
+        clearAllActiveCategoryDeks();
+        setIsE2ESession(false);
+        setUserProfile(null);
+        setLinks([]);
+        setIsLocked(false);
+        setPendingVerificationUser(fbUser);
+        setAuthReady(true);
+        return;
+      }
+
+      await hydrateVerifiedFirebaseUser(fbUser);
     });
 
     return () => {
       window.clearTimeout(safetyTimer);
       unsubscribeAuth();
     };
-  }, [
-    isE2ESession,
-    loadCachedLinks,
-    saveCachedLinks,
-    loadCachedCategories,
-    loadProfileExtras,
-    saveProfileExtras,
-    seedStarterVaultInFirestore,
-  ]);
+  }, [isE2ESession, hydrateVerifiedFirebaseUser]);
 
   // Real-Time Firestore Listeners for User Profile, Categories, and Links
   useEffect(() => {
-    if (!authReady || !userProfile || isE2ESession || !auth.currentUser) {
+    if (!authReady || !userProfile || isE2ESession || !auth.currentUser?.emailVerified) {
       return;
     }
 
@@ -499,11 +659,16 @@ export default function App() {
           setUserProfile((prev) => ({
             uid,
             email: extras.email || d.email || prev?.email || '',
+            emailVerified: true,
             displayName: extras.displayName || d.displayName || prev?.displayName || 'LINKHUB User',
             photoURL:
               extras.photoURL !== undefined ? extras.photoURL : d.photoURL ?? prev?.photoURL ?? '',
             pin: typeof d.pin === 'string' ? d.pin : prev?.pin || '',
+            pinVerifier: typeof d.pinVerifier === 'string' ? d.pinVerifier : prev?.pinVerifier || '',
+            vaultVersion: typeof d.vaultVersion === 'number' ? d.vaultVersion : prev?.vaultVersion ?? 2,
             ...extras,
+            securityQuestion: prev?.securityQuestion ?? extras.securityQuestion,
+            securityAnswerHash: prev?.securityAnswerHash,
           }));
         }
       },
@@ -526,6 +691,8 @@ export default function App() {
             icon: data.icon || 'folder',
             description: data.description || '',
             isDefault: Boolean(data.isDefault),
+            isPrivate: Boolean(data.isPrivate),
+            privateVaultMeta: typeof data.privateVaultMeta === 'string' ? data.privateVaultMeta : '',
             order: typeof data.order === 'number' ? data.order : 0,
             createdAt: toMillis(data.createdAt),
           };
@@ -587,7 +754,10 @@ export default function App() {
             clickCount: typeof data.clickCount === 'number' ? data.clickCount : 0,
             imageUrl: data.imageUrl || '',
             faviconUrl: data.faviconUrl || '',
-            isEncrypted: isLinkEncrypted({ title: rawTitle, url: rawUrl, description: rawDesc }),
+            isEncrypted:
+              Boolean(data.isEncrypted) ||
+              isLinkEncrypted({ title: rawTitle, url: rawUrl, description: rawDesc }),
+            cryptoVersion: typeof data.cryptoVersion === 'number' ? data.cryptoVersion : 1,
             createdAt: toMillis(data.createdAt),
             updatedAt: toMillis(data.updatedAt),
           };
@@ -644,25 +814,43 @@ export default function App() {
     return slugs;
   }, [categories]);
 
-  // Decrypt links in memory only for private categories that are currently unlocked
-  const decryptedLinks = useMemo(() => {
+  // Decrypt links asynchronously in RAM only for private categories whose DEK is currently unlocked
+  useEffect(() => {
+    let cancelled = false;
+    const uid = userProfile?.uid || '';
     const catBySlug = new Map<string, Category>();
     categories.forEach((c) => {
       catBySlug.set(c.slug, c);
       catBySlug.set((c.slug || '').toLowerCase().trim(), c);
     });
-    return links.map((link) => {
-      const normSlug = (link.categorySlug || '').toLowerCase().trim();
-      const cat = catBySlug.get(link.categorySlug) || catBySlug.get(normSlug);
-      if (cat?.isPrivate || isLinkEncrypted(link) || link.isEncrypted) {
-        const isUnlocked = Boolean(
-          cat && (unlockedPrivateSlugs.has(cat.slug) || unlockedPrivateSlugs.has(normSlug))
-        );
-        return decryptLinkInMemory(link, cat, isUnlocked);
+
+    const runDecryption = async () => {
+      const resolved = await Promise.all(
+        links.map(async (link) => {
+          const normSlug = (link.categorySlug || '').toLowerCase().trim();
+          const cat = catBySlug.get(link.categorySlug) || catBySlug.get(normSlug);
+          if (cat?.isPrivate || isLinkEncrypted(link) || link.isEncrypted) {
+            const isUnlocked = Boolean(
+              cat && (unlockedPrivateSlugs.has(cat.slug) || unlockedPrivateSlugs.has(normSlug))
+            );
+            if (!uid || !isUnlocked) {
+              return maskedPrivateLink(link);
+            }
+            return decryptLinkInMemoryAsync(link, uid, cat, isUnlocked);
+          }
+          return link;
+        })
+      );
+      if (!cancelled) {
+        setDecryptedLinks(resolved);
       }
-      return link;
-    });
-  }, [links, categories, unlockedPrivateSlugs]);
+    };
+
+    void runDecryption();
+    return () => {
+      cancelled = true;
+    };
+  }, [links, categories, unlockedPrivateSlugs, userProfile?.uid, privateUnlockVersion]);
 
   // Non-private links (used for All Links count, Favorites count, and global search suggestions when private categories are locked)
   const publicLinks = useMemo(() => {
@@ -757,17 +945,21 @@ export default function App() {
   const handleLockPrivateCategory = useCallback(
     (slug: string) => {
       playRetroLock();
+      if (userProfile?.uid) {
+        clearActiveCategoryDek(userProfile.uid, slug);
+      }
       setUnlockedPrivateSlugs((prev) => {
         const next = new Set(prev);
         next.delete(slug);
         return next;
       });
+      setPrivateUnlockVersion((v) => v + 1);
       if (activeCategory === slug) {
         setActiveCategory('all');
       }
       showToast('Category locked!');
     },
-    [activeCategory, categories, showToast]
+    [activeCategory, userProfile?.uid, showToast]
   );
 
   // ============================================================================
@@ -781,11 +973,29 @@ export default function App() {
       const targetId = editingLink.id;
       const targetSlug = linkData.categorySlug || editingLink.categorySlug || 'study';
       const targetCat = categories.find((c) => c.slug === targetSlug);
-      const plainTitle = (linkData.title || editingLink.title || 'Bookmark').trim();
 
-      const preparedInput = targetCat?.isPrivate
-        ? encryptLinkForStorage({ ...editingLink, ...linkData, id: targetId }, targetCat)
-        : { ...editingLink, ...linkData, id: targetId };
+      let preparedInput: Partial<LinkItem>;
+      if (targetCat?.isPrivate) {
+        try {
+          preparedInput = await encryptLinkForStorageAsync(
+            { ...editingLink, ...linkData, id: targetId },
+            uid,
+            targetCat
+          );
+        } catch {
+          playRetroBeep();
+          showToast(`Unlock "${targetCat.name}" with your PIN before saving links.`, 'warning');
+          return;
+        }
+      } else {
+        preparedInput = {
+          ...editingLink,
+          ...linkData,
+          id: targetId,
+          isEncrypted: false,
+          cryptoVersion: 1,
+        };
+      }
 
       const sanitized = sanitizeLinkCreate(preparedInput, uid);
 
@@ -802,7 +1012,8 @@ export default function App() {
                 isFavorite: sanitized.isFavorite,
                 imageUrl: sanitized.imageUrl,
                 faviconUrl: sanitized.faviconUrl,
-                isEncrypted: Boolean(targetCat?.isPrivate),
+                isEncrypted: sanitized.isEncrypted,
+                cryptoVersion: sanitized.cryptoVersion,
                 updatedAt: Date.now(),
               }
             : l
@@ -811,11 +1022,7 @@ export default function App() {
         return next;
       });
 
-      showToast(
-        targetCat?.isPrivate
-          ? 'Private link updated!'
-          : 'Link updated!'
-      );
+      showToast(targetCat?.isPrivate ? 'Private link updated!' : 'Link updated!');
       setEditingLink(null);
 
       if (!isE2ESession) {
@@ -829,6 +1036,8 @@ export default function App() {
             isFavorite: sanitized.isFavorite,
             imageUrl: sanitized.imageUrl,
             faviconUrl: sanitized.faviconUrl,
+            isEncrypted: sanitized.isEncrypted,
+            cryptoVersion: sanitized.cryptoVersion,
             updatedAt: serverTimestamp(),
           });
         } catch (error) {
@@ -844,28 +1053,39 @@ export default function App() {
       const defaultSlug = categories[0]?.slug || 'study';
       const targetSlug = linkData.categorySlug || defaultSlug;
       const targetCat = categories.find((c) => c.slug === targetSlug);
-      const plainTitle = (linkData.title || 'Bookmark').trim();
+      const newId = `link-${Date.now()}`;
 
-      const preparedInput = targetCat?.isPrivate
-        ? encryptLinkForStorage(
+      let preparedInput: Partial<LinkItem>;
+      if (targetCat?.isPrivate) {
+        try {
+          preparedInput = await encryptLinkForStorageAsync(
             {
               ...linkData,
-              id: `link-${Date.now()}`,
+              id: newId,
               categorySlug: targetSlug,
             },
+            uid,
             targetCat
-          )
-        : {
-            ...linkData,
-            id: `link-${Date.now()}`,
-            categorySlug: targetSlug,
-          };
+          );
+        } catch {
+          playRetroBeep();
+          showToast(`Unlock "${targetCat.name}" with your PIN before adding private links.`, 'warning');
+          return;
+        }
+      } else {
+        preparedInput = {
+          ...linkData,
+          id: newId,
+          categorySlug: targetSlug,
+          isEncrypted: false,
+          cryptoVersion: 1,
+        };
+      }
 
       const payload = sanitizeLinkCreate(preparedInput, uid);
 
       const newLinkItem: LinkItem = {
         ...payload,
-        isEncrypted: Boolean(targetCat?.isPrivate),
         createdAt: Date.now(),
         updatedAt: Date.now(),
       };
@@ -901,11 +1121,7 @@ export default function App() {
         setActiveTag(null);
       }
 
-      showToast(
-        targetCat?.isPrivate
-          ? 'Link encrypted & saved!'
-          : 'Link saved to vault!'
-      );
+      showToast(targetCat?.isPrivate ? 'Link encrypted & saved!' : 'Link saved to vault!');
       try {
         confetti({
           particleCount: 40,
@@ -1011,81 +1227,100 @@ export default function App() {
     setActiveTag(activeTag === tag ? null : tag);
   };
 
-  // Category CRUD operations in Firestore (with Encrypted Private Category support)
+  // Category CRUD operations in Firestore (with AES-256-GCM Private Category support)
   const handleSaveCategory = async (catData: Partial<Category>) => {
     if (!userProfile) return;
     const uid = userProfile.uid;
 
     if (editingCategory) {
       const targetId = editingCategory.id;
-      const encoded = encodeCategoryForStorage(
-        { ...editingCategory, ...catData, id: targetId },
-        uid
-      );
+      let encoded: Awaited<ReturnType<typeof encodeCategoryForStorageAsync>>;
+      try {
+        encoded = await encodeCategoryForStorageAsync(
+          { ...editingCategory, ...catData, id: targetId },
+          uid
+        );
+      } catch (err) {
+        playRetroBeep();
+        showToast(err instanceof Error ? err.message : 'Could not secure private category.', 'error');
+        return;
+      }
+
       const sanitized = sanitizeCategoryCreate(
         {
           ...editingCategory,
           ...catData,
           id: targetId,
           name: encoded.name,
+          slug: encoded.slug,
           description: encoded.description,
+          isPrivate: encoded.isPrivate,
+          privateVaultMeta: encoded.privateVaultMeta,
         },
         uid,
         editingCategory.order
       );
 
-      const decodedCat = decodeCategoryFromStorage(
-        {
-          ...sanitized,
-          createdAt: editingCategory.createdAt || Date.now(),
-          isPrivate: encoded.isPrivate,
-          privatePinHash: encoded.privatePinHash,
-        },
-        uid
-      );
+      const displayCat: Category = {
+        ...decodeCategoryFromStorage(
+          {
+            ...sanitized,
+            createdAt: editingCategory.createdAt || Date.now(),
+          },
+          uid
+        ),
+        name: encoded.name,
+      };
 
       setCategories((prev) => {
-        const next = prev.map((c) => (c.id === targetId ? decodedCat : c));
+        const next = prev.map((c) => (c.id === targetId ? displayCat : c));
         saveCachedCategories(uid, next);
         return next;
       });
 
       const newlyEncryptedLinks: LinkItem[] = [];
-      if (decodedCat.isPrivate) {
-        setUnlockedPrivateSlugs((prev) => new Set(prev).add(decodedCat.slug));
-        setLinks((prev) => {
-          const next = prev.map((l) => {
-            if (
-              (l.categorySlug === decodedCat.slug ||
-                (l.categorySlug || '').toLowerCase().trim() ===
-                  (decodedCat.slug || '').toLowerCase().trim()) &&
-              !isLinkEncrypted(l)
-            ) {
-              const enc = encryptLinkForStorage(l, decodedCat);
-              const encItem: LinkItem = {
-                ...l,
-                title: enc.title || l.title,
-                url: enc.url || l.url,
-                description: enc.description || '',
-                imageUrl: '',
-                faviconUrl: '',
-                isEncrypted: true,
-              };
-              newlyEncryptedLinks.push(encItem);
-              return encItem;
-            }
-            return l;
+      if (displayCat.isPrivate) {
+        setUnlockedPrivateSlugs((prev) => new Set(prev).add(displayCat.slug));
+        setPrivateUnlockVersion((v) => v + 1);
+
+        const sourceLinks = decryptedLinks.length === links.length ? decryptedLinks : links;
+        const targets = sourceLinks.filter(
+          (l) =>
+            (l.categorySlug === displayCat.slug ||
+              (l.categorySlug || '').toLowerCase().trim() ===
+                (displayCat.slug || '').toLowerCase().trim()) &&
+            !isLinkEncrypted(l)
+        );
+
+        for (const l of targets) {
+          try {
+            const enc = await encryptLinkForStorageAsync(l, uid, displayCat);
+            newlyEncryptedLinks.push({
+              ...l,
+              title: enc.title || l.title,
+              url: enc.url || l.url,
+              description: enc.description || '',
+              imageUrl: '',
+              faviconUrl: '',
+              isEncrypted: true,
+              cryptoVersion: 2,
+            });
+          } catch (err) {
+            console.warn('Could not encrypt existing link in category:', err);
+          }
+        }
+
+        if (newlyEncryptedLinks.length > 0) {
+          const encById = new Map(newlyEncryptedLinks.map((l) => [l.id, l]));
+          setLinks((prev) => {
+            const next = prev.map((l) => encById.get(l.id) || l);
+            saveCachedLinks(uid, next);
+            return next;
           });
-          saveCachedLinks(uid, next);
-          return next;
-        });
+        }
       }
 
-      showToast(
-        decodedCat.isPrivate
-          ? 'Private category updated!'
-          : 'Category updated!'
-      );
+      showToast(displayCat.isPrivate ? 'Private category updated!' : 'Category updated!');
       setEditingCategory(null);
 
       if (!isE2ESession) {
@@ -1096,6 +1331,9 @@ export default function App() {
             color: sanitized.color,
             icon: sanitized.icon,
             description: sanitized.description,
+            isPrivate: sanitized.isPrivate,
+            privateVaultMeta: sanitized.privateVaultMeta,
+            order: sanitized.order,
             updatedAt: serverTimestamp(),
           });
         } catch (error) {
@@ -1113,9 +1351,14 @@ export default function App() {
             await updateDoc(doc(db, `users/${uid}/links`, encLink.id), {
               title: sanitizedLink.title,
               url: sanitizedLink.url,
+              categorySlug: sanitizedLink.categorySlug,
               description: sanitizedLink.description,
+              tags: sanitizedLink.tags,
+              isFavorite: sanitizedLink.isFavorite,
               imageUrl: '',
               faviconUrl: '',
+              isEncrypted: true,
+              cryptoVersion: 2,
               updatedAt: serverTimestamp(),
             });
           } catch {
@@ -1126,46 +1369,59 @@ export default function App() {
         }
       }
     } else {
-      const encoded = encodeCategoryForStorage(
-        {
-          ...catData,
-          id: `cat-${Date.now()}`,
-        },
-        uid
-      );
+      const newCatId = `cat-${Date.now()}`;
+      let encoded: Awaited<ReturnType<typeof encodeCategoryForStorageAsync>>;
+      try {
+        encoded = await encodeCategoryForStorageAsync(
+          {
+            ...catData,
+            id: newCatId,
+          },
+          uid
+        );
+      } catch (err) {
+        playRetroBeep();
+        showToast(err instanceof Error ? err.message : 'Could not secure private category.', 'error');
+        return;
+      }
 
       const payload = sanitizeCategoryCreate(
         {
           ...catData,
-          id: `cat-${Date.now()}`,
+          id: newCatId,
           name: encoded.name,
+          slug: encoded.slug,
           description: encoded.description,
+          isPrivate: encoded.isPrivate,
+          privateVaultMeta: encoded.privateVaultMeta,
           isDefault: false,
         },
         uid,
         categories.length
       );
 
-      const decodedCat = decodeCategoryFromStorage(
-        {
-          ...payload,
-          createdAt: Date.now(),
-          isPrivate: encoded.isPrivate,
-          privatePinHash: encoded.privatePinHash,
-        },
-        uid
-      );
+      const displayCat: Category = {
+        ...decodeCategoryFromStorage(
+          {
+            ...payload,
+            createdAt: Date.now(),
+          },
+          uid
+        ),
+        name: encoded.name,
+      };
 
       setCategories((prev) => {
-        const next = [...prev, decodedCat];
+        const next = [...prev, displayCat];
         saveCachedCategories(uid, next);
         return next;
       });
 
-      if (decodedCat.isPrivate) {
-        setUnlockedPrivateSlugs((prev) => new Set(prev).add(decodedCat.slug));
-        setActiveCategory(decodedCat.slug);
-        showToast('Private category created!');
+      if (displayCat.isPrivate) {
+        setUnlockedPrivateSlugs((prev) => new Set(prev).add(displayCat.slug));
+        setPrivateUnlockVersion((v) => v + 1);
+        setActiveCategory(displayCat.slug);
+        showToast('Private category created & encrypted (AES-256-GCM)!');
       } else {
         showToast('Category created!');
       }
@@ -1398,11 +1654,13 @@ export default function App() {
     }
   }, [authReady, userProfile, handleSaveSharedCategoryLinks]);
 
-  // Lock and PIN operations stored in UserProfile in Firestore
+  // Lock and PBKDF2 PIN / Recovery verification operations
   const handleLockVault = () => {
     playRetroLock();
+    clearAllActiveCategoryDeks();
     setIsLocked(true);
     setUnlockedPrivateSlugs(new Set());
+    setPrivateUnlockVersion((v) => v + 1);
     if (privateCategorySlugs.has(activeCategory)) {
       setActiveCategory('all');
     }
@@ -1412,30 +1670,109 @@ export default function App() {
   const handleSavePin = async (newPin: string | null) => {
     if (!userProfile) return;
     const cleanPin = sanitizePin(newPin);
+    const verifier = cleanPin.length === 6 ? await createSecretVerifier(cleanPin, 'vault-pin') : '';
 
-    setUserProfile((prev) => (prev ? { ...prev, pin: cleanPin } : null));
+    setUserProfile((prev) =>
+      prev
+        ? {
+            ...prev,
+            pin: '',
+            pinVerifier: verifier,
+            vaultVersion: 2,
+          }
+        : null
+    );
 
     if (!isE2ESession) {
       try {
         await updateDoc(doc(db, 'users', userProfile.uid), {
-          pin: cleanPin,
+          pin: '',
+          pinVerifier: verifier,
+          vaultVersion: 2,
           updatedAt: serverTimestamp(),
         });
       } catch (error) {
-        console.warn('Could not sync PIN to Firestore:', error);
+        console.warn('Could not sync PIN verifier to Firestore:', error);
       }
     }
 
-    if (cleanPin) {
-      showToast('Security PIN saved!');
+    if (cleanPin.length === 6) {
+      showToast('Security PIN secured!');
     } else {
       showToast('Security PIN removed!');
     }
   };
 
+  const handleVerifyVaultPin = useCallback(
+    async (candidatePin: string): Promise<boolean> => {
+      if (!userProfile) return false;
+      if (userProfile.pinVerifier) {
+        return verifySecretVerifier(candidatePin, userProfile.pinVerifier, 'vault-pin');
+      }
+      if (userProfile.pin && userProfile.pin.length === 6) {
+        const matched = candidatePin === userProfile.pin;
+        if (matched) {
+          // Silently upgrade legacy v1 plaintext PIN to v2 PBKDF2 verifier on first successful unlock
+          const upgradedVerifier = await createSecretVerifier(candidatePin, 'vault-pin');
+          setUserProfile((prev) =>
+            prev ? { ...prev, pin: '', pinVerifier: upgradedVerifier, vaultVersion: 2 } : prev
+          );
+          if (!isE2ESession) {
+            updateDoc(doc(db, 'users', userProfile.uid), {
+              pin: '',
+              pinVerifier: upgradedVerifier,
+              vaultVersion: 2,
+              updatedAt: serverTimestamp(),
+            }).catch(() => {});
+          }
+        }
+        return matched;
+      }
+      return false;
+    },
+    [userProfile, isE2ESession]
+  );
+
+  const handleVerifySecurityAnswer = useCallback(
+    async (answer: string): Promise<boolean> => {
+      if (!userProfile?.securityAnswerHash) return false;
+      const normalized = answer.trim().toLowerCase();
+      if (!normalized) return false;
+      return verifySecretVerifier(normalized, userProfile.securityAnswerHash, 'security-answer');
+    },
+    [userProfile?.securityAnswerHash]
+  );
+
+  const handleReauthenticateRecovery = useCallback(
+    async (password?: string): Promise<boolean> => {
+      if (isE2ESession || !auth.currentUser) return false;
+      const providers = auth.currentUser.providerData.map((p) => p.providerId);
+      try {
+        if (providers.includes('google.com')) {
+          await reauthenticateWithPopup(auth.currentUser, googleProvider);
+          return true;
+        }
+        if (providers.includes('password') && password && auth.currentUser.email) {
+          const cred = EmailAuthProvider.credential(auth.currentUser.email, password);
+          await reauthenticateWithCredential(auth.currentUser, cred);
+          return true;
+        }
+      } catch (err) {
+        console.warn('Re-authentication failed:', err);
+        return false;
+      }
+      return false;
+    },
+    [isE2ESession]
+  );
+
   // Sign out handler
   const handleSignOut = async () => {
     playRetroClick();
+    clearAllActiveCategoryDeks();
+    setUnlockedPrivateSlugs(new Set());
+    setPrivateUnlockVersion(0);
+    setPendingVerificationUser(null);
     setIsSettingsOpen(false);
     if (isE2ESession) {
       setIsE2ESession(false);
@@ -1452,47 +1789,90 @@ export default function App() {
     }
   };
 
-  // Profile update handler (syncs allowed fields to Firestore and extended fields to localStorage)
-  const handleSaveProfile = async (updated: Partial<UserProfile>) => {
+  // Profile & Preferences update handler (syncs profile fields + /users/{uid}/preferences/default)
+  const handleSaveProfile = async (
+    updated: Partial<UserProfile> & { securityAnswerPlain?: string }
+  ) => {
     if (!userProfile) return;
     const uid = userProfile.uid;
+
+    const { securityAnswerPlain, ...cleanUpdated } = updated;
+    let nextAnswerHash = userProfile.securityAnswerHash;
+    if (typeof securityAnswerPlain === 'string' && securityAnswerPlain.trim().length > 0) {
+      nextAnswerHash = await createSecretVerifier(
+        securityAnswerPlain.trim().toLowerCase(),
+        'security-answer'
+      );
+    }
+
+    if (cleanUpdated.soundEnabled !== undefined) {
+      setSoundEnabled(cleanUpdated.soundEnabled !== false);
+    }
+
     const mergedExtras: Partial<UserProfile> = {
       ...loadProfileExtras(uid),
-      ...updated,
+      ...cleanUpdated,
     };
     saveProfileExtras(uid, mergedExtras);
 
-    const nextDisplayName = (updated.displayName || userProfile.displayName || 'LINKHUB User').slice(
-      0,
-      100
-    );
-    const nextEmail = (updated.email || userProfile.email || 'user@linkhub.cloud').slice(0, 150);
-    const nextPhoto = updated.photoURL ?? userProfile.photoURL ?? '';
+    const nextDisplayName = (
+      cleanUpdated.displayName ||
+      userProfile.displayName ||
+      'LINKHUB User'
+    ).slice(0, 100);
+    const nextEmail = (cleanUpdated.email || userProfile.email || 'user@linkhub.cloud').slice(0, 150);
+    const nextPhoto = cleanUpdated.photoURL ?? userProfile.photoURL ?? '';
 
-    setUserProfile((prev) =>
-      prev
-        ? {
-            ...prev,
-            ...updated,
-            displayName: nextDisplayName,
-            email: nextEmail,
-            photoURL: nextPhoto,
-          }
-        : null
-    );
+    const nextProfileState: UserProfile = {
+      ...userProfile,
+      ...cleanUpdated,
+      displayName: nextDisplayName,
+      email: nextEmail,
+      photoURL: nextPhoto,
+      securityAnswerHash: nextAnswerHash,
+    };
+    setUserProfile(nextProfileState);
     showToast('Settings saved!');
 
     if (!isE2ESession) {
       try {
-        const firestorePatch: Record<string, unknown> = {
-          displayName: nextDisplayName,
-          email: nextEmail,
-          updatedAt: serverTimestamp(),
-        };
-        if (typeof nextPhoto === 'string' && nextPhoto.length <= 32768) {
-          firestorePatch.photoURL = nextPhoto;
+        if (
+          cleanUpdated.displayName !== undefined ||
+          cleanUpdated.email !== undefined ||
+          cleanUpdated.photoURL !== undefined
+        ) {
+          const firestorePatch: Record<string, unknown> = {
+            displayName: nextDisplayName,
+            email: nextEmail,
+            updatedAt: serverTimestamp(),
+          };
+          if (typeof nextPhoto === 'string' && nextPhoto.length <= 32768) {
+            firestorePatch.photoURL = nextPhoto;
+          }
+          await updateDoc(doc(db, 'users', uid), firestorePatch);
         }
-        await updateDoc(doc(db, 'users', uid), firestorePatch);
+
+        const hasPreferenceChange =
+          cleanUpdated.firstName !== undefined ||
+          cleanUpdated.lastName !== undefined ||
+          cleanUpdated.countryCode !== undefined ||
+          cleanUpdated.autoLockMinutes !== undefined ||
+          cleanUpdated.soundEnabled !== undefined ||
+          cleanUpdated.securityQuestion !== undefined ||
+          Boolean(securityAnswerPlain);
+
+        if (hasPreferenceChange) {
+          const prefRef = doc(db, `users/${uid}/preferences`, 'default');
+          const prefPatch = sanitizePreferencesUpdate({
+            ...cleanUpdated,
+            ...(nextAnswerHash ? { securityAnswerHash: nextAnswerHash } : {}),
+          });
+          try {
+            await updateDoc(prefRef, prefPatch);
+          } catch {
+            await setDoc(prefRef, sanitizePreferencesCreate(uid, nextProfileState));
+          }
+        }
       } catch (err) {
         console.warn('Could not sync profile update to Firestore:', err);
       }
@@ -1555,7 +1935,7 @@ export default function App() {
     showToast(`Imported ${newItems.length} link${newItems.length === 1 ? '' : 's'}!`);
   };
 
-  // 1. Auth Initialization Loading Screen
+  // 1. Auth Initialization Screen
   if (!authReady) {
     return (
       <div className="min-h-[100dvh] bg-[#0b0b0b] text-white flex flex-col items-center justify-center p-6 gap-4">
@@ -1571,7 +1951,97 @@ export default function App() {
     );
   }
 
-  // 2. Mandatory Login Landing Page when Unauthenticated (with Pre-Login Shared QR Preview Support)
+  // 2. Mandatory Verified Email Link Gate before Vault Hydration
+  if ((pendingVerificationUser || e2ePendingVerifyEmail) && !userProfile && !isE2ESession) {
+    const verificationEmail = pendingVerificationUser?.email || e2ePendingVerifyEmail || '';
+
+    return (
+      <>
+        <EmailVerificationScreen
+          email={verificationEmail}
+          onRefreshVerification={async (silent = false) => {
+            if (e2ePendingVerifyEmail && !pendingVerificationUser) {
+              if (!e2eEmailVerifiedRef.current) {
+                if (!silent) {
+                  showToast('Email not verified yet — check your inbox.', 'warning');
+                }
+                return false;
+              }
+              setE2ePendingVerifyEmail(null);
+              setIsE2ESession(true);
+              setUserProfile({
+                uid: 'e2e_verified_link_user',
+                email: verificationEmail,
+                emailVerified: true,
+                displayName: verificationEmail.split('@')[0] || 'LinkHub User',
+                photoURL: '',
+                pin: '',
+                pinVerifier: '',
+                vaultVersion: 2,
+              });
+              setCategories(INITIAL_CATEGORIES);
+              setLinks(INITIAL_LINKS);
+              showToast('Email verified! Welcome to LINKHUB.', 'success');
+              return true;
+            }
+
+            if (!pendingVerificationUser) return false;
+            try {
+              await reload(pendingVerificationUser);
+              if (auth.currentUser?.emailVerified) {
+                await auth.currentUser.getIdToken(true);
+                await hydrateVerifiedFirebaseUser(auth.currentUser);
+                showToast('Email verified! Welcome to LINKHUB.', 'success');
+                return true;
+              }
+              if (!silent) {
+                showToast('Email not verified yet — check your inbox.', 'warning');
+              }
+              return false;
+            } catch {
+              if (!silent) {
+                showToast('Could not refresh verification status.', 'error');
+              }
+              return false;
+            }
+          }}
+          onResendEmail={async () => {
+            if (e2ePendingVerifyEmail && !pendingVerificationUser) {
+              e2eEmailVerifiedRef.current = true;
+              return;
+            }
+            if (!pendingVerificationUser) return;
+            await sendEmailVerification(pendingVerificationUser);
+          }}
+          onSignOut={async () => {
+            if (e2ePendingVerifyEmail && !pendingVerificationUser) {
+              e2eEmailVerifiedRef.current = false;
+              setE2ePendingVerifyEmail(null);
+              return;
+            }
+            if (pendingVerificationUser && !pendingVerificationUser.emailVerified) {
+              try {
+                await deleteUser(pendingVerificationUser);
+              } catch {
+                // Fall back to standard signOut if recent login expired
+              }
+            }
+            await handleSignOut();
+          }}
+          onShowToast={showToast}
+        />
+
+        <Toast
+          toast={toast}
+          onDismiss={dismissToast}
+          onPause={pauseToast}
+          onResume={resumeToast}
+        />
+      </>
+    );
+  }
+
+  // 3. Mandatory Login Landing Page when Unauthenticated (with Pre-Login Shared QR Preview Support)
   if (!userProfile) {
     return (
       <>
@@ -1584,11 +2054,15 @@ export default function App() {
         {isScanQrOpen && (
           <ScanQrModal
             isOpen={isScanQrOpen}
-            onClose={() => setIsScanQrOpen(false)}
+            onClose={() => {
+              setIsScanQrOpen(false);
+              setPendingShareToken(null);
+            }}
             categories={categories}
             links={links}
             activeCategorySlug={activeCategory}
             initialBundle={pendingSharedBundle}
+            initialShareToken={pendingShareToken}
             isAuthenticated={false}
             onSaveSharedCategoryLinks={handleSaveSharedCategoryLinks}
           />
@@ -1604,18 +2078,22 @@ export default function App() {
     );
   }
 
-  // 3. Session PIN Lock Screen when Locked
+  // 4. Session PIN Lock Screen when Locked
   if (isLocked) {
+    const providerIds = auth.currentUser?.providerData.map((p) => p.providerId) || [];
     return (
       <>
         <LockedScreen
           onUnlock={() => setIsLocked(false)}
-          hasPin={Boolean(userProfile.pin)}
-          correctPin={userProfile.pin || null}
-          userEmail={userProfile.email}
+          hasPin={Boolean(userProfile.pinVerifier || userProfile.pin)}
+          onVerifyPin={handleVerifyVaultPin}
           userName={userProfile.displayName}
           securityQuestion={userProfile.securityQuestion}
-          securityAnswer={userProfile.securityAnswer}
+          hasSecurityAnswer={Boolean(userProfile.securityAnswerHash)}
+          onVerifySecurityAnswer={handleVerifySecurityAnswer}
+          onReauthenticateRecovery={isE2ESession ? undefined : handleReauthenticateRecovery}
+          canReauthenticatePassword={providerIds.includes('password')}
+          canReauthenticateGoogle={providerIds.includes('google.com')}
           onResetPin={async (newPin) => {
             await handleSavePin(newPin);
             setIsLocked(false);
@@ -1665,7 +2143,7 @@ export default function App() {
         onOpenCommandSearch={() => setIsCommandSearchOpen(true)}
         searchQuery={searchQuery}
         onSearchChange={setSearchQuery}
-        hasPin={Boolean(userProfile.pin)}
+        hasPin={Boolean(userProfile.pinVerifier || userProfile.pin)}
         user={userProfile}
         onOpenSettings={() => setIsSettingsOpen((prev) => !prev)}
         onChangePhoto={handleChangeProfilePhoto}
@@ -2222,7 +2700,7 @@ export default function App() {
           isOpen={isPinModalOpen}
           onClose={() => setIsPinModalOpen(false)}
           onSavePin={handleSavePin}
-          currentPin={userProfile.pin || null}
+          hasPin={Boolean(userProfile.pinVerifier || userProfile.pin)}
         />
       )}
 
@@ -2238,8 +2716,9 @@ export default function App() {
         <ExportModal
           isOpen={isExportOpen}
           onClose={() => setIsExportOpen(false)}
-          links={links}
+          links={searchableLinks}
           categories={categories}
+          lockedPrivateCount={Math.max(0, links.length - searchableLinks.length)}
           onShowToast={showToast}
         />
       )}
@@ -2272,8 +2751,8 @@ export default function App() {
         <ShareQrModal
           isOpen={isShareCategoryQrOpen}
           onClose={() => setIsShareCategoryQrOpen(false)}
-          categories={categories}
-          links={links}
+          categories={categories.filter((c) => !c.isPrivate || unlockedPrivateSlugs.has(c.slug))}
+          links={searchableLinks}
           initialCategorySlug={shareCategorySlug}
           onShowToast={showToast}
         />
@@ -2285,11 +2764,13 @@ export default function App() {
           onClose={() => {
             setIsScanQrOpen(false);
             setPendingSharedBundle(null);
+            setPendingShareToken(null);
           }}
           categories={categories}
-          links={links}
+          links={searchableLinks}
           activeCategorySlug={activeCategory}
           initialBundle={pendingSharedBundle}
+          initialShareToken={pendingShareToken}
           isAuthenticated={true}
           onSaveSharedCategoryLinks={handleSaveSharedCategoryLinks}
         />
@@ -2315,22 +2796,100 @@ export default function App() {
       {pendingPrivateUnlock && (
         <PrivateCategoryPinModal
           isOpen={Boolean(pendingPrivateUnlock)}
+          userId={userProfile.uid}
           category={pendingPrivateUnlock.category}
           onClose={() => setPendingPrivateUnlock(null)}
-          onUnlockSuccess={(unlockedCat) => {
+          onUnlockSuccess={async (unlockedCat, enteredPin) => {
             const action = pendingPrivateUnlock.action;
+            const uid = userProfile.uid;
+            let resolvedCat = unlockedCat;
+
+            try {
+              const catLinks = links.filter(
+                (l) =>
+                  l.categorySlug === unlockedCat.slug ||
+                  (l.categorySlug || '').toLowerCase().trim() ===
+                    (unlockedCat.slug || '').toLowerCase().trim()
+              );
+
+              if (needsVaultMigration(unlockedCat, catLinks)) {
+                const migrated = await migrateLegacyCategoryToV2({
+                  userId: uid,
+                  legacyCategory: unlockedCat,
+                  categoryLinks: catLinks,
+                  enteredPin,
+                });
+                setActiveCategoryDek(uid, unlockedCat.slug, migrated.dek);
+                resolvedCat = {
+                  ...migrated.upgradedCategory,
+                  name: migrated.decryptedName,
+                  description: migrated.decryptedDescription,
+                };
+                const upgradedById = new Map(migrated.upgradedLinks.map((l) => [l.id, l]));
+                setCategories((prev) => {
+                  const next = prev.map((c) => (c.id === unlockedCat.id ? resolvedCat : c));
+                  saveCachedCategories(uid, next);
+                  return next;
+                });
+                setLinks((prev) => {
+                  const next = prev.map((l) => upgradedById.get(l.id) || l);
+                  saveCachedLinks(uid, next);
+                  return next;
+                });
+
+                if (!isE2ESession) {
+                  const batch = writeBatch(db);
+                  const catPayload = sanitizeCategoryCreate(
+                    migrated.upgradedCategory,
+                    uid,
+                    resolvedCat.order
+                  );
+                  batch.set(doc(db, `users/${uid}/categories`, unlockedCat.id), catPayload, {
+                    merge: true,
+                  });
+                  for (const upLink of migrated.upgradedLinks) {
+                    const linkPayload = sanitizeLinkCreate(upLink, uid);
+                    batch.set(doc(db, `users/${uid}/links`, upLink.id), linkPayload, {
+                      merge: true,
+                    });
+                  }
+                  await batch.commit();
+                }
+                clearMigrationCheckpoint(uid, unlockedCat.slug);
+                showToast('Private category upgraded to AES-256-GCM encryption!', 'success');
+              } else {
+                const unlockedMeta = await unlockAndStoreCategoryDek(uid, unlockedCat, enteredPin);
+                resolvedCat = {
+                  ...unlockedCat,
+                  name: unlockedMeta.name || unlockedCat.name,
+                  description: unlockedMeta.description || unlockedCat.description,
+                };
+                setCategories((prev) =>
+                  prev.map((c) => (c.id === unlockedCat.id ? resolvedCat : c))
+                );
+                showToast('Category unlocked!');
+              }
+            } catch (err) {
+              playRetroBeep();
+              showToast(
+                err instanceof Error ? err.message : 'Failed to unlock private vault.',
+                'error'
+              );
+              return;
+            }
+
             setPendingPrivateUnlock(null);
-            setUnlockedPrivateSlugs((prev) => new Set(prev).add(unlockedCat.slug));
-            showToast('Category unlocked!');
+            setUnlockedPrivateSlugs((prev) => new Set(prev).add(resolvedCat.slug));
+            setPrivateUnlockVersion((v) => v + 1);
             if (action === 'select') {
-              setActiveCategory(unlockedCat.slug);
+              setActiveCategory(resolvedCat.slug);
             } else if (action === 'edit') {
-              setEditingCategory(unlockedCat);
+              setEditingCategory(resolvedCat);
               setIsCategoryModalOpen(true);
             } else if (action === 'delete') {
-              handleDeleteCategory(unlockedCat);
+              handleDeleteCategory(resolvedCat);
             } else if (action === 'share') {
-              setShareCategorySlug(unlockedCat.slug);
+              setShareCategorySlug(resolvedCat.slug);
               setIsShareCategoryQrOpen(true);
             }
           }}

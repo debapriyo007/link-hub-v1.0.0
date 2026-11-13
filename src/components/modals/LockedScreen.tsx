@@ -8,30 +8,39 @@ import { ToastVariant } from '../ui/Toast.tsx';
 interface LockedScreenProps {
   onUnlock: () => void;
   hasPin: boolean;
-  correctPin: string | null;
-  userEmail?: string;
+  onVerifyPin: (candidatePin: string) => Promise<boolean>;
   userName?: string;
   securityQuestion?: string;
-  securityAnswer?: string;
-  onResetPin: (newPin: string | null) => void;
+  hasSecurityAnswer?: boolean;
+  onVerifySecurityAnswer: (answer: string) => Promise<boolean>;
+  onReauthenticateRecovery?: (password?: string) => Promise<boolean>;
+  canReauthenticatePassword?: boolean;
+  canReauthenticateGoogle?: boolean;
+  onResetPin: (newPin: string | null) => Promise<void> | void;
   onShowToast?: (message: string, variant?: ToastVariant) => void;
 }
 
 export const LockedScreen: React.FC<LockedScreenProps> = ({
   onUnlock,
   hasPin,
-  correctPin,
-  userEmail,
+  onVerifyPin,
   securityQuestion,
-  securityAnswer,
+  hasSecurityAnswer = false,
+  onVerifySecurityAnswer,
+  onReauthenticateRecovery,
+  canReauthenticatePassword = false,
+  canReauthenticateGoogle = false,
   onResetPin,
   onShowToast,
 }) => {
   const [pin, setPin] = useState('');
   const [showNumbers, setShowNumbers] = useState(false);
   const [pinError, setPinError] = useState(false);
+  const [verifying, setVerifying] = useState(false);
   const [mode, setMode] = useState<'unlock' | 'security-question' | 'set-new-pin'>('unlock');
   const [answerInput, setAnswerInput] = useState('');
+  const [reauthPassword, setReauthPassword] = useState('');
+  const [recoveryVerified, setRecoveryVerified] = useState(false);
   const [enterCycle, setEnterCycle] = useState(1);
   const [isRevealing, setIsRevealing] = useState(
     () => typeof document === 'undefined' || document.visibilityState === 'visible'
@@ -92,52 +101,70 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
   const activeQuestion =
     securityQuestion && securityQuestion.trim().length > 0
       ? securityQuestion
-      : 'What is your signed-in account email address?';
+      : 'Verify your identity to reset your Security PIN';
 
   const handleDigit = useCallback(
-    (digit: string) => {
-      if (pin.length >= 6) return;
+    async (digit: string) => {
+      if (verifying || pin.length >= 6) return;
       playRetroClick();
       const nextPin = pin + digit;
       setPin(nextPin);
       setPinError(false);
 
       if (nextPin.length === 6) {
-        if (mode === 'set-new-pin') {
-          playRetroUnlockChime();
-          onResetPin(nextPin);
-          return;
-        }
+        setVerifying(true);
+        try {
+          if (mode === 'set-new-pin') {
+            if (hasPin && !recoveryVerified) {
+              playRetroBeep();
+              onShowToast?.('Verify your recovery challenge before resetting PIN.', 'error');
+              setMode('security-question');
+              setPin('');
+              return;
+            }
+            playRetroUnlockChime();
+            await onResetPin(nextPin);
+            return;
+          }
 
-        if (!correctPin || nextPin === correctPin) {
-          playRetroUnlockChime();
-          onUnlock();
-        } else {
+          const valid = await onVerifyPin(nextPin);
+          if (valid) {
+            playRetroUnlockChime();
+            onUnlock();
+          } else {
+            playRetroBeep();
+            setPinError(true);
+            onShowToast?.('Incorrect PIN code. Try again!', 'error');
+            setTimeout(() => {
+              setPin('');
+              setPinError(false);
+            }, 380);
+          }
+        } catch {
           playRetroBeep();
-          setPinError(true);
-          onShowToast?.('Incorrect PIN code. Try again!', 'error');
-          setTimeout(() => {
-            setPin('');
-            setPinError(false);
-          }, 420);
+          onShowToast?.('Verification failed. Please try again.', 'error');
+          setPin('');
+        } finally {
+          setVerifying(false);
         }
       }
     },
-    [pin, mode, correctPin, onUnlock, onResetPin, onShowToast]
+    [pin, verifying, mode, hasPin, recoveryVerified, onVerifyPin, onUnlock, onResetPin, onShowToast]
   );
 
   const handleClear = useCallback(() => {
+    if (verifying) return;
     playRetroClick();
     setPin('');
     setPinError(false);
-  }, []);
+  }, [verifying]);
 
   const handleDelete = useCallback(() => {
-    if (pin.length === 0) return;
+    if (verifying || pin.length === 0) return;
     playRetroClick();
     setPin((prev) => prev.slice(0, -1));
     setPinError(false);
-  }, [pin.length]);
+  }, [pin.length, verifying]);
 
   // Allow typing digits and Backspace on physical keyboard
   useEffect(() => {
@@ -145,7 +172,7 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
     const onKeyDown = (e: KeyboardEvent) => {
       if (/^[0-9]$/.test(e.key)) {
         e.preventDefault();
-        handleDigit(e.key);
+        void handleDigit(e.key);
       } else if (e.key === 'Backspace') {
         e.preventDefault();
         handleDelete();
@@ -158,33 +185,63 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [mode, hasPin, handleDigit, handleDelete, handleClear]);
 
-  const handleVerifySecurityQuestion = (e: React.FormEvent) => {
+  const handleVerifySecurityQuestion = async (e: React.FormEvent) => {
     e.preventDefault();
-    const cleanInput = answerInput.trim().toLowerCase();
-    const expectedAnswer =
-      securityAnswer && securityAnswer.trim().length > 0
-        ? securityAnswer.trim().toLowerCase()
-        : (userEmail || '').trim().toLowerCase();
+    if (verifying) return;
 
-    if (!cleanInput) {
-      playRetroBeep();
-      onShowToast?.('Please enter your answer to continue!', 'error');
+    if (hasSecurityAnswer) {
+      const cleanInput = answerInput.trim();
+      if (!cleanInput) {
+        playRetroBeep();
+        onShowToast?.('Please enter your recovery answer to continue!', 'error');
+        return;
+      }
+      setVerifying(true);
+      try {
+        const matched = await onVerifySecurityAnswer(cleanInput);
+        if (!matched) {
+          playRetroBeep();
+          onShowToast?.('Incorrect recovery answer.', 'error');
+          return;
+        }
+        playRetroUnlockChime();
+        setRecoveryVerified(true);
+        setAnswerInput('');
+        setPin('');
+        setMode('set-new-pin');
+      } finally {
+        setVerifying(false);
+      }
       return;
     }
 
-    if (
-      expectedAnswer &&
-      cleanInput !== expectedAnswer &&
-      cleanInput !== (userEmail || '').trim().toLowerCase()
-    ) {
-      playRetroBeep();
-      onShowToast?.('Answer mismatch. Try your account email!', 'error');
+    if (onReauthenticateRecovery) {
+      if (canReauthenticatePassword && !canReauthenticateGoogle && !reauthPassword) {
+        playRetroBeep();
+        onShowToast?.('Enter your account password to verify ownership.', 'error');
+        return;
+      }
+      setVerifying(true);
+      try {
+        const ok = await onReauthenticateRecovery(reauthPassword || undefined);
+        if (!ok) {
+          playRetroBeep();
+          onShowToast?.('Account re-authentication failed.', 'error');
+          return;
+        }
+        playRetroUnlockChime();
+        setRecoveryVerified(true);
+        setReauthPassword('');
+        setPin('');
+        setMode('set-new-pin');
+      } finally {
+        setVerifying(false);
+      }
       return;
     }
 
-    playRetroClick();
-    setPin('');
-    setMode('set-new-pin');
+    playRetroBeep();
+    onShowToast?.('Sign out and re-authenticate to reset an unconfigured recovery PIN.', 'error');
   };
 
   return (
@@ -223,72 +280,83 @@ export const LockedScreen: React.FC<LockedScreenProps> = ({
             <LinkHubLogo size="md" />
           </div>
 
-          {/* Mode 1: Security Question Recovery */}
+          {/* Mode 1: Verified Recovery Challenge */}
           {mode === 'security-question' ? (
             <div className="w-full flex flex-col items-center">
-            <h1 className="font-title font-bold text-base text-white tracking-tight mb-1">
-              Security Recovery
-            </h1>
-            <p className="text-[11px] text-zinc-400 mb-4">
-              Answer your security question to reset your PIN
-            </p>
+              <h1 className="font-title font-bold text-base text-white tracking-tight mb-1">
+                Security Recovery
+              </h1>
+              <p className="text-[11px] text-zinc-400 mb-4">
+                {hasSecurityAnswer
+                  ? 'Verify your secret recovery answer to reset your PIN'
+                  : 'Re-authenticate your signed-in account to reset your PIN'}
+              </p>
 
-            <form
-              onSubmit={handleVerifySecurityQuestion}
-              className="w-full space-y-3 text-left"
-              noValidate
-            >
-              <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.07]">
-                <div className="text-[10px] uppercase tracking-wider font-semibold text-[#ff9000] mb-1 flex items-center gap-1.5">
-                  <KeyRound size={11} />
-                  <span>Security Question</span>
-                </div>
-                <p className="text-xs font-medium text-zinc-200">{activeQuestion}</p>
-              </div>
-
-              <div>
-                <input
-                  type="text"
-                  value={answerInput}
-                  onChange={(e) => setAnswerInput(e.target.value)}
-                  placeholder="Enter your answer..."
-                  autoFocus
-                  className="w-full h-10 px-3.5 rounded-xl bg-white/[0.03] border border-white/[0.08] focus:border-[#ff9000] text-xs text-white placeholder:text-zinc-500 outline-none transition-all"
-                />
-              </div>
-
-              <button
-                type="submit"
-                className="w-full h-10 rounded-xl bg-[#ff9000] hover:bg-[#ffa31a] active:scale-[0.99] text-black font-bold text-xs uppercase tracking-wider shadow-[0_8px_20px_rgba(255,144,0,0.25)] transition-all cursor-pointer"
+              <form
+                onSubmit={handleVerifySecurityQuestion}
+                className="w-full space-y-3 text-left"
+                noValidate
               >
-                Verify & Set New PIN
-              </button>
+                <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.07]">
+                  <div className="text-[10px] uppercase tracking-wider font-semibold text-[#ff9000] mb-1 flex items-center gap-1.5">
+                    <KeyRound size={11} />
+                    <span>{hasSecurityAnswer ? 'Security Question' : 'Account Verification'}</span>
+                  </div>
+                  <p className="text-xs font-medium text-zinc-200">{activeQuestion}</p>
+                </div>
+
+                {hasSecurityAnswer ? (
+                  <div>
+                    <input
+                      type="password"
+                      value={answerInput}
+                      onChange={(e) => setAnswerInput(e.target.value)}
+                      placeholder="Enter your recovery answer..."
+                      autoFocus
+                      className="w-full h-10 px-3.5 rounded-xl bg-white/[0.03] border border-white/[0.08] focus:border-[#ff9000] text-xs text-white placeholder:text-zinc-500 outline-none transition-all"
+                    />
+                  </div>
+                ) : canReauthenticatePassword && !canReauthenticateGoogle ? (
+                  <div>
+                    <input
+                      type="password"
+                      value={reauthPassword}
+                      onChange={(e) => setReauthPassword(e.target.value)}
+                      placeholder="Enter your account password..."
+                      autoFocus
+                      className="w-full h-10 px-3.5 rounded-xl bg-white/[0.03] border border-white/[0.08] focus:border-[#ff9000] text-xs text-white placeholder:text-zinc-500 outline-none transition-all"
+                    />
+                  </div>
+                ) : null}
+
+                <button
+                  type="submit"
+                  disabled={verifying}
+                  className="w-full h-10 rounded-xl bg-[#ff9000] hover:bg-[#ffa31a] disabled:opacity-60 active:scale-[0.99] text-black font-bold text-xs uppercase tracking-wider shadow-[0_8px_20px_rgba(255,144,0,0.25)] transition-all cursor-pointer"
+                >
+                  {verifying
+                    ? 'Verifying...'
+                    : hasSecurityAnswer
+                      ? 'Verify & Reset PIN'
+                      : canReauthenticateGoogle
+                        ? 'Re-authenticate with Google'
+                        : 'Verify Password & Reset PIN'}
+                </button>
+              </form>
 
               <button
                 type="button"
                 onClick={() => {
-                  playRetroUnlockChime();
-                  onResetPin(null);
+                  playRetroClick();
+                  setMode('unlock');
                 }}
-                className="w-full h-9 rounded-xl bg-white/[0.03] hover:bg-white/[0.07] border border-white/[0.07] text-zinc-300 text-[11px] font-medium transition-colors cursor-pointer"
+                className="mt-4 text-[11px] text-zinc-400 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer"
               >
-                Remove PIN & Unlock Vault
+                <ArrowLeft size={12} />
+                <span>Back to Security PIN</span>
               </button>
-            </form>
-
-            <button
-              type="button"
-              onClick={() => {
-                playRetroClick();
-                setMode('unlock');
-              }}
-              className="mt-4 text-[11px] text-zinc-400 hover:text-white flex items-center gap-1.5 transition-colors cursor-pointer"
-            >
-              <ArrowLeft size={12} />
-              <span>Back to Security PIN</span>
-            </button>
-          </div>
-        ) : hasPin || mode === 'set-new-pin' ? (
+            </div>
+          ) : hasPin || mode === 'set-new-pin' ? (
           /* Mode 2: Enter Security PIN / Set New PIN */
           <div className="w-full flex flex-col items-center">
             <h1 className="font-title font-bold text-base sm:text-lg text-white tracking-tight mb-1">

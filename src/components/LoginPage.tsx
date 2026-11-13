@@ -1,11 +1,15 @@
 import React, { useState, useRef } from 'react';
 import { Eye, EyeOff, QrCode } from 'lucide-react';
 import {
+  auth,
+  googleProvider,
+  signInWithPopup,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
-} from 'firebase/auth';
-import { auth, googleProvider, signInWithPopup } from '../firebase.ts';
+  sendEmailVerification,
+  firebaseSignOut,
+} from '../firebase.ts';
 import { playRetroUnlockChime, playRetroBeep } from '../utils/sound.ts';
 import { LinkHubLogo } from './LinkHubLogo.tsx';
 import { ToastVariant } from './ui/Toast.tsx';
@@ -87,11 +91,47 @@ export const LoginPage: React.FC<LoginPageProps> = ({
     }
   };
 
+  const sendVerificationLinkWithFeedback = async (
+    targetUser: Parameters<typeof sendEmailVerification>[0],
+    resent = false
+  ) => {
+    try {
+      await sendEmailVerification(targetUser);
+      onShowToast?.(
+        resent
+          ? 'Verification link re-sent! Check your email inbox or spam folder.'
+          : 'Account created! Check your email inbox or spam folder for the verification link.',
+        'success'
+      );
+    } catch (mailErr: unknown) {
+      playRetroBeep();
+      const mailMsg = mailErr instanceof Error ? mailErr.message : '';
+      if (mailMsg.includes('auth/too-many-requests')) {
+        onShowToast?.(
+          'Account created, but too many verification emails were sent. Wait a minute and click Resend link.',
+          'warning'
+        );
+      } else {
+        onShowToast?.(
+          'Account created, but verification email could not be sent right now. Click Resend link on the next screen.',
+          'warning'
+        );
+      }
+    }
+  };
+
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim()) {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail) {
       playRetroBeep();
       onShowToast?.('Please enter your email address!', 'error');
+      emailInputRef.current?.focus();
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      playRetroBeep();
+      onShowToast?.('Please enter a valid email address.', 'error');
       emailInputRef.current?.focus();
       return;
     }
@@ -100,15 +140,72 @@ export const LoginPage: React.FC<LoginPageProps> = ({
       onShowToast?.('Please enter your password!', 'error');
       return;
     }
+    if (isCreateAccount && password.length < 8) {
+      playRetroBeep();
+      onShowToast?.('Use at least 8 characters for your password.', 'error');
+      return;
+    }
 
     setIsSigningIn(true);
     try {
       if (isCreateAccount) {
-        await createUserWithEmailAndPassword(auth, email.trim(), password);
+        try {
+          const cred = await createUserWithEmailAndPassword(auth, normalizedEmail, password);
+          await sendVerificationLinkWithFeedback(cred.user, false);
+        } catch (createErr: unknown) {
+          const createMsg = createErr instanceof Error ? createErr.message : '';
+          if (!createMsg.includes('auth/email-already-in-use')) {
+            throw createErr;
+          }
+
+          // Check whether the existing account is unverified (with same password)
+          try {
+            const existingCred = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+            if (!existingCred.user.emailVerified) {
+              await sendVerificationLinkWithFeedback(existingCred.user, true);
+              return;
+            }
+            await firebaseSignOut(auth);
+            setIsCreateAccount(false);
+            onShowToast?.('This email is already registered and verified. Please login.', 'info');
+            return;
+          } catch {
+            // Optional server-side cleanup for stale unverified password-only accounts if Admin SDK is configured
+            try {
+              const cleanupRes = await fetch('/api/auth/cleanup-unverified', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ email: normalizedEmail }),
+              });
+              const cleanupData = (await cleanupRes.json().catch(() => null)) as
+                | { cleaned?: boolean }
+                | null;
+              if (cleanupRes.ok && cleanupData?.cleaned) {
+                const retryCred = await createUserWithEmailAndPassword(
+                  auth,
+                  normalizedEmail,
+                  password
+                );
+                await sendVerificationLinkWithFeedback(retryCred.user, false);
+                return;
+              }
+            } catch {
+              // Ignore optional cleanup failure
+            }
+
+            playRetroBeep();
+            onShowToast?.('An account with that email already exists.', 'error');
+            return;
+          }
+        }
       } else {
-        await signInWithEmailAndPassword(auth, email.trim(), password);
+        const cred = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+        if (!cred.user.emailVerified) {
+          onShowToast?.('Please verify your email link before opening your vault.', 'warning');
+        } else {
+          playRetroUnlockChime();
+        }
       }
-      playRetroUnlockChime();
     } catch (err: unknown) {
       playRetroBeep();
       const message = err instanceof Error ? err.message : 'Unable to sign in with email!';
@@ -116,6 +213,14 @@ export const LoginPage: React.FC<LoginPageProps> = ({
         onShowToast?.('Use Google login to sign in!', 'error');
       } else if (message.includes('auth/invalid-credential') || message.includes('auth/wrong-password')) {
         onShowToast?.('Invalid email or password!', 'error');
+      } else if (message.includes('auth/email-already-in-use')) {
+        onShowToast?.('An account with that email already exists.', 'error');
+      } else if (message.includes('auth/weak-password')) {
+        onShowToast?.('Choose a stronger password (at least 8 characters).', 'error');
+      } else if (message.includes('auth/too-many-requests')) {
+        onShowToast?.('Too many attempts. Please wait a minute and try again.', 'error');
+      } else if (message.includes('auth/invalid-email')) {
+        onShowToast?.('Please enter a valid email address.', 'error');
       } else {
         onShowToast?.(message, 'error');
       }

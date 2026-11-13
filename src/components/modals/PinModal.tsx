@@ -5,54 +5,62 @@ import { LinkHubLogo } from '../LinkHubLogo.tsx';
 interface PinModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSavePin: (pin: string | null) => void;
-  currentPin: string | null;
+  onSavePin: (pin: string | null) => Promise<void> | void;
+  hasPin: boolean;
 }
 
 export const PinModal: React.FC<PinModalProps> = ({
   isOpen,
   onClose,
   onSavePin,
-  currentPin,
+  hasPin,
 }) => {
   const [pin, setPin] = useState('');
   const [showNumbers, setShowNumbers] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setPin('');
       setShowNumbers(false);
+      setSaving(false);
     }
   }, [isOpen]);
 
   const handleDigit = useCallback(
     (digit: string) => {
-      if (pin.length >= 6) return;
+      if (saving || pin.length >= 6) return;
       playRetroClick();
       const nextPin = pin + digit;
       setPin(nextPin);
 
       if (nextPin.length === 6) {
-        setTimeout(() => {
-          playRetroUnlockChime();
-          onSavePin(nextPin);
-          onClose();
-        }, 120);
+        setSaving(true);
+        setTimeout(async () => {
+          try {
+            playRetroUnlockChime();
+            await onSavePin(nextPin);
+            onClose();
+          } finally {
+            setSaving(false);
+          }
+        }, 100);
       }
     },
-    [pin, onSavePin, onClose]
+    [pin, saving, onSavePin, onClose]
   );
 
   const handleDelete = useCallback(() => {
-    if (pin.length === 0) return;
+    if (saving || pin.length === 0) return;
     playRetroClick();
     setPin((prev) => prev.slice(0, -1));
-  }, [pin.length]);
+  }, [pin.length, saving]);
 
   const handleClear = useCallback(() => {
+    if (saving) return;
     playRetroClick();
     setPin('');
-  }, []);
+  }, [saving]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -74,10 +82,16 @@ export const PinModal: React.FC<PinModalProps> = ({
 
   if (!isOpen) return null;
 
-  const handleRemovePin = () => {
+  const handleRemovePin = async () => {
+    if (saving) return;
     playRetroClick();
-    onSavePin(null);
-    onClose();
+    setSaving(true);
+    try {
+      await onSavePin(null);
+      onClose();
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -98,7 +112,7 @@ export const PinModal: React.FC<PinModalProps> = ({
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={currentPin ? 'Change Security PIN' : 'Set Security PIN'}
+        aria-label={hasPin ? 'Change Security PIN' : 'Set Security PIN'}
         className="w-full max-w-[330px] rounded-2xl bg-[#121318]/85 backdrop-blur-xl border border-white/[0.08] shadow-[0_24px_64px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.08)] px-5 py-6 flex flex-col items-center text-center relative z-10 animate-in zoom-in-95 duration-150"
       >
         {/* Brand Logo */}
@@ -108,10 +122,10 @@ export const PinModal: React.FC<PinModalProps> = ({
 
         {/* Minimal Title & Subtitle */}
         <h2 className="font-title font-bold text-base sm:text-lg text-white tracking-tight mb-1">
-          {currentPin ? 'Change Security PIN' : 'Set Security PIN'}
+          {hasPin ? 'Change Security PIN' : 'Set Security PIN'}
         </h2>
         <p className="text-[11px] text-zinc-400 mb-4">
-          Enter 6-digit PIN to save
+          {saving ? 'Securing PIN with PBKDF2...' : 'Enter 6-digit PIN to save'}
         </p>
 
         {/* 6 Compact Circular Passcode Dots (Matching Home Lock Screen) */}
@@ -193,7 +207,7 @@ export const PinModal: React.FC<PinModalProps> = ({
           >
             Cancel
           </button>
-          {currentPin && (
+          {hasPin && (
             <>
               <span className="text-white/15">•</span>
               <button

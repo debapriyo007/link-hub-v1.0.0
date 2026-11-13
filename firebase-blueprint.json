@@ -2,7 +2,7 @@
   "entities": {
     "UserProfile": {
       "title": "UserProfile",
-      "description": "Authenticated user profile and vault security configuration.",
+      "description": "Authenticated user profile and hardened v2 vault security configuration.",
       "type": "object",
       "properties": {
         "uid": {
@@ -33,10 +33,20 @@
         },
         "pin": {
           "type": "string",
-          "description": "Optional 6-digit vault lock PIN or empty string when disabled.",
+          "description": "Legacy v1 field kept empty in v2; replaced by pinVerifier.",
           "minLength": 0,
           "maxLength": 6,
           "pattern": "^([0-9]{6})?$"
+        },
+        "pinVerifier": {
+          "type": "string",
+          "description": "PBKDF2-SHA256 salted verifier envelope for vault lock PIN (never plaintext).",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "vaultVersion": {
+          "type": "number",
+          "description": "Schema/cryptography version (1 = legacy, 2 = AES-256-GCM)."
         },
         "createdAt": {
           "type": "string",
@@ -50,6 +60,107 @@
         }
       },
       "required": ["uid", "email", "displayName", "photoURL", "pin", "createdAt", "updatedAt"]
+    },
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "Owner-only synced client preferences and hashed PIN recovery challenge.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "firstName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "lastName": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 60
+        },
+        "countryCode": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 40
+        },
+        "autoLockMinutes": {
+          "type": "number"
+        },
+        "soundEnabled": {
+          "type": "boolean"
+        },
+        "securityQuestion": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 160
+        },
+        "securityAnswerHash": {
+          "type": "string",
+          "description": "PBKDF2-SHA256 salted verifier for PIN recovery answer.",
+          "minLength": 0,
+          "maxLength": 256
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "createdAt", "updatedAt"]
+    },
+    "Entitlement": {
+      "title": "Entitlement",
+      "description": "Server-managed subscription and billing entitlement record (client read-only).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "plan": {
+          "type": "string",
+          "enum": ["free", "pro", "team"]
+        },
+        "status": {
+          "type": "string",
+          "enum": ["active", "canceled", "past_due", "expired"]
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "plan", "status", "updatedAt"]
     },
     "Category": {
       "title": "Category",
@@ -72,9 +183,9 @@
         },
         "name": {
           "type": "string",
-          "description": "Display name of the category.",
+          "description": "Display name or encrypted category label.",
           "minLength": 1,
-          "maxLength": 60
+          "maxLength": 240
         },
         "slug": {
           "type": "string",
@@ -97,13 +208,23 @@
         },
         "description": {
           "type": "string",
-          "description": "Optional category description.",
+          "description": "Category description or private vault encrypted envelope.",
           "minLength": 0,
-          "maxLength": 240
+          "maxLength": 1024
         },
         "isDefault": {
           "type": "boolean",
           "description": "Whether this is a starter category."
+        },
+        "isPrivate": {
+          "type": "boolean",
+          "description": "Whether bookmarks in this category are client-side encrypted."
+        },
+        "privateVaultMeta": {
+          "type": "string",
+          "description": "v2 PBKDF2 + AES-GCM wrapped DEK metadata for private categories.",
+          "minLength": 0,
+          "maxLength": 1024
         },
         "order": {
           "type": "number",
@@ -155,16 +276,16 @@
         },
         "title": {
           "type": "string",
-          "description": "Bookmark title.",
+          "description": "Bookmark title or ENC2 AES-256-GCM ciphertext.",
           "minLength": 1,
-          "maxLength": 160
+          "maxLength": 512
         },
         "url": {
           "type": "string",
           "format": "uri",
-          "description": "Destination URL of the bookmark.",
+          "description": "Destination URL or encrypted vault URL payload.",
           "minLength": 4,
-          "maxLength": 2048
+          "maxLength": 4096
         },
         "categorySlug": {
           "type": "string",
@@ -175,9 +296,9 @@
         },
         "description": {
           "type": "string",
-          "description": "Notes or summary for the bookmark.",
+          "description": "Notes, summary, or ENC2 ciphertext.",
           "minLength": 0,
-          "maxLength": 500
+          "maxLength": 2048
         },
         "tags": {
           "type": "array",
@@ -202,6 +323,14 @@
           "description": "Favicon URL for the bookmark domain.",
           "minLength": 0,
           "maxLength": 2048
+        },
+        "isEncrypted": {
+          "type": "boolean",
+          "description": "Whether sensitive link fields are encrypted."
+        },
+        "cryptoVersion": {
+          "type": "number",
+          "description": "1 = legacy ENC1, 2 = AES-256-GCM ENC2."
         },
         "createdAt": {
           "type": "string",
@@ -229,6 +358,88 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "ShareRecord": {
+      "title": "ShareRecord",
+      "description": "High-entropy revocable, expiring read-only category share bundle.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "High-entropy share token identifier (>= 22 URL-safe chars).",
+          "minLength": 22,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "ownerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "categoryName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "categorySlug": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "categoryIcon": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 40
+        },
+        "categoryColor": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 20
+        },
+        "readOnly": {
+          "type": "boolean"
+        },
+        "hasPassword": {
+          "type": "boolean"
+        },
+        "revoked": {
+          "type": "boolean"
+        },
+        "linkCount": {
+          "type": "number"
+        },
+        "links": {
+          "type": "array",
+          "description": "Bounded snapshot of up to 40 shared public bookmarks."
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "ownerId",
+        "categoryName",
+        "categorySlug",
+        "readOnly",
+        "hasPassword",
+        "revoked",
+        "links",
+        "expiresAt",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -237,6 +448,18 @@
         "$ref": "#/entities/UserProfile"
       },
       "description": "Private user profile and vault security configuration document."
+    },
+    "/users/{userId}/preferences/{prefId}": {
+      "schema": {
+        "$ref": "#/entities/UserPreferences"
+      },
+      "description": "Owner-only preferences and hashed recovery challenge."
+    },
+    "/users/{userId}/entitlements/{entitlementId}": {
+      "schema": {
+        "$ref": "#/entities/Entitlement"
+      },
+      "description": "Server-managed subscription and entitlement records (client read-only)."
     },
     "/users/{userId}/categories/{categoryId}": {
       "schema": {
@@ -249,6 +472,12 @@
         "$ref": "#/entities/LinkItem"
       },
       "description": "User's private bookmarks subcollection."
+    },
+    "/shares/{shareId}": {
+      "schema": {
+        "$ref": "#/entities/ShareRecord"
+      },
+      "description": "High-entropy revocable, expiring read-only category share records."
     }
   }
 }

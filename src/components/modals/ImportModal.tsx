@@ -23,6 +23,15 @@ export const ImportModal: React.FC<ImportModalProps> = ({
 
   if (!isOpen) return null;
 
+  const isSafeHttpUrl = (raw: string): boolean => {
+    try {
+      const u = new URL(raw.trim());
+      return u.protocol === 'http:' || u.protocol === 'https:';
+    } catch {
+      return false;
+    }
+  };
+
   const processText = (text: string) => {
     if (!text.trim()) {
       setImportCount(null);
@@ -36,25 +45,29 @@ export const ImportModal: React.FC<ImportModalProps> = ({
           ? parsed
           : (parsed as { links?: unknown[] }).links || [];
         const links: LinkItem[] = (rawLinks as Array<Record<string, unknown>>)
-          .map((item, idx) => ({
-            id: (item.id as string) || `imported-${Date.now()}-${idx}`,
-            title:
-              (item.title as string) ||
-              extractDomain((item.url as string) || '') ||
-              'Untitled Link',
-            url: (item.url as string) || '',
-            categorySlug: (item.categorySlug as string) || 'study',
-            description: (item.description as string) || '',
-            tags: Array.isArray(item.tags) ? (item.tags as string[]) : [],
-            isFavorite: Boolean(item.isFavorite),
-            clickCount: Number(item.clickCount) || 0,
-            imageUrl: (item.imageUrl as string) || '',
-            faviconUrl:
-              (item.faviconUrl as string) || getFaviconUrl((item.url as string) || ''),
-            createdAt: Number(item.createdAt) || Date.now(),
-            updatedAt: Number(item.updatedAt) || Date.now(),
-          }))
-          .filter((l) => l.url.startsWith('http'));
+          .filter((item) => typeof item?.url === 'string' && isSafeHttpUrl(item.url))
+          .map((item, idx) => {
+            const safeUrl = new URL(String(item.url).trim()).toString();
+            const rawImg = typeof item.imageUrl === 'string' ? item.imageUrl : '';
+            const rawFav = typeof item.faviconUrl === 'string' ? item.faviconUrl : '';
+            return {
+              id: (item.id as string) || `imported-${Date.now()}-${idx}`,
+              title:
+                (item.title as string) || extractDomain(safeUrl) || 'Untitled Link',
+              url: safeUrl,
+              categorySlug: (item.categorySlug as string) || 'study',
+              description: (item.description as string) || '',
+              tags: Array.isArray(item.tags) ? (item.tags as string[]) : [],
+              isFavorite: Boolean(item.isFavorite),
+              clickCount: Number(item.clickCount) || 0,
+              imageUrl: isSafeHttpUrl(rawImg) ? new URL(rawImg.trim()).toString() : '',
+              faviconUrl: isSafeHttpUrl(rawFav)
+                ? new URL(rawFav.trim()).toString()
+                : getFaviconUrl(safeUrl),
+              createdAt: Number(item.createdAt) || Date.now(),
+              updatedAt: Number(item.updatedAt) || Date.now(),
+            };
+          });
 
         const rawCategories: Category[] | undefined = (parsed as { categories?: Category[] })
           .categories;
@@ -64,21 +77,24 @@ export const ImportModal: React.FC<ImportModalProps> = ({
       } else {
         const partials = parseHtmlBookmarks(text);
         const links: LinkItem[] = partials
-          .map((p, idx) => ({
-            id: `imported-html-${Date.now()}-${idx}`,
-            title: p.title || 'Imported Link',
-            url: p.url || '',
-            categorySlug: p.categorySlug || 'study',
-            description: p.description || '',
-            tags: p.tags || [],
-            isFavorite: Boolean(p.isFavorite),
-            clickCount: 0,
-            imageUrl: '',
-            faviconUrl: getFaviconUrl(p.url || ''),
-            createdAt: Date.now(),
-            updatedAt: Date.now(),
-          }))
-          .filter((l) => l.url.startsWith('http'));
+          .filter((p) => typeof p.url === 'string' && isSafeHttpUrl(p.url))
+          .map((p, idx) => {
+            const safeUrl = new URL(String(p.url).trim()).toString();
+            return {
+              id: `imported-html-${Date.now()}-${idx}`,
+              title: p.title || 'Imported Link',
+              url: safeUrl,
+              categorySlug: p.categorySlug || 'study',
+              description: p.description || '',
+              tags: p.tags || [],
+              isFavorite: Boolean(p.isFavorite),
+              clickCount: 0,
+              imageUrl: '',
+              faviconUrl: getFaviconUrl(safeUrl),
+              createdAt: Date.now(),
+              updatedAt: Date.now(),
+            };
+          });
 
         setImportCount(links.length);
         setError('');

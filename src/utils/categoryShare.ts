@@ -8,8 +8,12 @@ export interface SharedLinkEntry {
 }
 
 export interface SharedCategoryBundle {
-  version: 1;
+  version: 1 | 2;
   shortCode: string;
+  shareToken?: string;
+  readOnly?: boolean;
+  hasPassword?: boolean;
+  expiresAt?: number;
   categoryName: string;
   categorySlug: string;
   categoryIcon?: string;
@@ -34,6 +38,21 @@ export interface PendingSharedImport {
 const REGISTRY_STORAGE_KEY = 'linkhub_shared_category_bundles_v1';
 const PENDING_IMPORT_STORAGE_KEY = 'linkhub_pending_shared_import_v1';
 
+export function sanitizeSharedHttpUrl(rawUrl: string): string | null {
+  try {
+    const parsed = new URL((rawUrl || '').trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    if (parsed.hostname === 'encrypted.linkhub.vault') {
+      return null;
+    }
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function toBase64Url(str: string): string {
   const bytes = new TextEncoder().encode(str);
   let binary = '';
@@ -55,45 +74,233 @@ function fromBase64Url(b64url: string): string {
 }
 
 /**
- * Generates a deterministic 6-digit numeric share code (formatted as LH-XXX-XXX)
- * for a category + its links so the same category state produces a clean, memorable code.
+ * Generates a CSPRNG offline short label when creating a portable fallback bundle.
  */
-export function generateCategoryShortCode(categoryName: string, links: SharedLinkEntry[]): string {
-  const seed = `${categoryName.trim().toLowerCase()}|${links.map((l) => l.url).join('|')}`;
-  let hash = 2166136261;
-  for (let i = 0; i < seed.length; i++) {
-    hash ^= seed.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
+export function generateCategoryShortCode(): string {
+  if (typeof globalThis !== 'undefined' && globalThis.crypto?.getRandomValues) {
+    const arr = new Uint32Array(1);
+    globalThis.crypto.getRandomValues(arr);
+    const num = (arr[0] % 900000) + 100000;
+    const digits = String(num);
+    return `LH-${digits.slice(0, 3)}-${digits.slice(3, 6)}`;
   }
-  const num = (Math.abs(hash) % 900000) + 100000;
-  const digits = String(num);
-  return `LH-${digits.slice(0, 3)}-${digits.slice(3, 6)}`;
+  return 'LH-OFF-LINE';
 }
 
-/**
- * Saves a bundle into localStorage registry so entering the short code (e.g. LH-123-456 or 123456)
- * or uploading a QR image resolves immediately.
- */
-export function registerSharedCategoryBundle(bundle: SharedCategoryBundle): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const raw = localStorage.getItem(REGISTRY_STORAGE_KEY);
-    const registry: Record<string, SharedCategoryBundle> = raw ? JSON.parse(raw) : {};
-    const normalizedKey = bundle.shortCode.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-    registry[normalizedKey] = bundle;
-    const digitsOnly = normalizedKey.replace(/^LH/, '');
-    if (digitsOnly) {
-      registry[digitsOnly] = bundle;
+export function extractServerShareToken(rawInput: string): string | null {
+  let trimmed = (rawInput || '').trim();
+  if (!trimmed) return null;
+
+  if (/^https?:\/\//i.test(trimmed) || trimmed.includes('?share=') || trimmed.includes('&share=')) {
+    try {
+      const urlObj = new URL(trimmed, 'https://linkhub.cloud');
+      const param = urlObj.searchParams.get('share');
+      if (param) trimmed = decodeURIComponent(param).trim();
+    } catch {
+      const m = trimmed.match(/[?&]share=([^&#\s]+)/i);
+      if (m?.[1]) {
+        try {
+          trimmed = decodeURIComponent(m[1]).trim();
+        } catch {
+          trimmed = m[1].trim();
+        }
+      }
     }
-    localStorage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(registry));
+  }
+
+  return /^lh2_[a-zA-Z0-9_-]{18,120}$/.test(trimmed) ? trimmed : null;
+}
+
+/**
+ * Creates a server-backed high-entropy share link with TTL, optional password, and revocation support.
+ */
+export async function createServerCategoryShare(params: {
+  category: Pick<Category, 'name' | 'slug' | 'icon' | 'color'>;
+  links: LinkItem[];
+  ttlHours?: number;
+  password?: string;
+}): Promise<{
+  shareToken: string;
+  shareUrl: string;
+  expiresAt: number;
+  hasPassword: boolean;
+  linkCount: number;
+}> {
+  const safeLinks = params.links
+    .slice(0, 40)
+    .map((l) => {
+      const cleanUrl = sanitizeSharedHttpUrl(l.url);
+      if (!cleanUrl) return null;
+      return {
+        title: (l.title || 'Shared Bookmark').slice(0, 120),
+        url: cleanUrl,
+        description: l.description ? l.description.slice(0, 240) : undefined,
+        tags: l.tags ? l.tags.slice(0, 6) : undefined,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+  if (safeLinks.length === 0) {
+    throw new Error('No shareable HTTP/HTTPS bookmarks found in this collection.');
+  }
+
+  const { getSecurityHeaders } = await import('../firebase.ts');
+  const headers = await getSecurityHeaders();
+  if (!headers.Authorization) {
+    throw new Error('Sign in with a verified account to generate server-backed share links.');
+  }
+
+  const response = await fetch('/api/shares', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+    body: JSON.stringify({
+      categoryName: params.category.name,
+      categorySlug: params.category.slug,
+      categoryIcon: params.category.icon || 'folder',
+      categoryColor: params.category.color || '#ff9000',
+      links: safeLinks,
+      ttlHours: params.ttlHours ?? 24 * 7,
+      password: params.password?.trim() || undefined,
+    }),
+  });
+
+  const payload = (await response.json()) as {
+    shareToken?: string;
+    expiresAt?: number;
+    hasPassword?: boolean;
+    linkCount?: number;
+    error?: string;
+  };
+
+  if (!response.ok || !payload.shareToken) {
+    throw new Error(payload.error || 'Could not create secure share link.');
+  }
+
+  const origin =
+    typeof window !== 'undefined' && window.location?.origin
+      ? window.location.origin
+      : 'https://linkhub.cloud';
+  const shareUrl = `${origin}/?share=${encodeURIComponent(payload.shareToken)}`;
+
+  return {
+    shareToken: payload.shareToken,
+    shareUrl,
+    expiresAt: payload.expiresAt || Date.now() + 7 * 24 * 3600 * 1000,
+    hasPassword: Boolean(payload.hasPassword),
+    linkCount: payload.linkCount || safeLinks.length,
+  };
+}
+
+export type ResolveServerShareResult =
+  | { status: 'ok'; bundle: SharedCategoryBundle }
+  | { status: 'password_required'; categoryName?: string; error?: string }
+  | { status: 'error'; error: string };
+
+export async function resolveServerCategoryShare(
+  tokenOrUrl: string,
+  password?: string
+): Promise<ResolveServerShareResult> {
+  const token = extractServerShareToken(tokenOrUrl);
+  if (!token) {
+    return { status: 'error', error: 'Invalid v2 share token format.' };
+  }
+
+  try {
+    const response = await fetch(`/api/shares/${encodeURIComponent(token)}/resolve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(password ? { password } : {}),
+    });
+
+    const data = (await response.json()) as {
+      requiresPassword?: boolean;
+      categoryName?: string;
+      categorySlug?: string;
+      categoryIcon?: string;
+      categoryColor?: string;
+      hasPassword?: boolean;
+      expiresAt?: number;
+      createdAt?: number;
+      links?: SharedLinkEntry[];
+      error?: string;
+    };
+
+    if (response.status === 401 && data.requiresPassword) {
+      return {
+        status: 'password_required',
+        categoryName: data.categoryName,
+        error: password ? data.error || 'Incorrect share password.' : undefined,
+      };
+    }
+
+    if (!response.ok || !Array.isArray(data.links)) {
+      return {
+        status: 'error',
+        error: data.error || 'Share link could not be loaded.',
+      };
+    }
+
+    const sanitizedLinks: SharedLinkEntry[] = data.links
+      .map((l) => {
+        const cleanUrl = sanitizeSharedHttpUrl(l.url);
+        if (!cleanUrl) return null;
+        return {
+          title: String(l.title || 'Shared Bookmark').slice(0, 120),
+          url: cleanUrl,
+          description: l.description ? String(l.description).slice(0, 240) : undefined,
+          tags: Array.isArray(l.tags) ? l.tags.map(String).slice(0, 6) : undefined,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+    return {
+      status: 'ok',
+      bundle: {
+        version: 2,
+        shortCode: token.slice(0, 12),
+        shareToken: token,
+        readOnly: true,
+        hasPassword: Boolean(data.hasPassword),
+        expiresAt: data.expiresAt,
+        categoryName: data.categoryName || 'Shared Collection',
+        categorySlug: data.categorySlug || 'shared',
+        categoryIcon: data.categoryIcon || 'folder',
+        categoryColor: data.categoryColor || '#ff9000',
+        links: sanitizedLinks,
+        createdAt: data.createdAt || Date.now(),
+      },
+    };
   } catch {
-    // Ignore storage quota errors
+    return {
+      status: 'error',
+      error: 'Could not reach share resolution service.',
+    };
+  }
+}
+
+export async function revokeServerCategoryShare(shareToken: string): Promise<void> {
+  const token = extractServerShareToken(shareToken);
+  if (!token) throw new Error('Invalid share token.');
+  const { getSecurityHeaders } = await import('../firebase.ts');
+  const headers = await getSecurityHeaders();
+  const res = await fetch(`/api/shares/${encodeURIComponent(token)}/revoke`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...headers,
+    },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as { error?: string }).error || 'Could not revoke share link.');
   }
 }
 
 /**
- * Creates a portable, self-contained share string ("LHCAT1:...") and a redirectable URL
- * ("https://.../?share=LHCAT1:...") that encodes the category and all its links.
+ * Offline portable fallback token generator (sanitizes all URLs and never exports encrypted vault placeholders).
  */
 export function encodeCategorySharePayload(
   category: Pick<Category, 'name' | 'slug' | 'icon' | 'color'>,
@@ -104,18 +311,26 @@ export function encodeCategorySharePayload(
   shareUrl: string;
   shareCode: string;
 } {
-  const sharedLinks: SharedLinkEntry[] = links.slice(0, 40).map((l) => ({
-    title: l.title,
-    url: l.url,
-    description: l.description ? l.description.slice(0, 120) : undefined,
-    tags: l.tags ? l.tags.slice(0, 4) : undefined,
-  }));
+  const sharedLinks: SharedLinkEntry[] = links
+    .slice(0, 40)
+    .map((l) => {
+      const cleanUrl = sanitizeSharedHttpUrl(l.url);
+      if (!cleanUrl) return null;
+      return {
+        title: l.title,
+        url: cleanUrl,
+        description: l.description ? l.description.slice(0, 120) : undefined,
+        tags: l.tags ? l.tags.slice(0, 4) : undefined,
+      };
+    })
+    .filter((x): x is NonNullable<typeof x> => Boolean(x));
 
-  const shortCode = generateCategoryShortCode(category.name, sharedLinks);
+  const shortCode = generateCategoryShortCode();
 
   const bundle: SharedCategoryBundle = {
     version: 1,
     shortCode,
+    readOnly: true,
     categoryName: category.name,
     categorySlug: category.slug,
     categoryIcon: category.icon,
@@ -123,8 +338,6 @@ export function encodeCategorySharePayload(
     links: sharedLinks,
     createdAt: Date.now(),
   };
-
-  registerSharedCategoryBundle(bundle);
 
   const compact = {
     c: bundle.categoryName,
@@ -155,20 +368,16 @@ export function encodeCategorySharePayload(
 }
 
 /**
- * Decodes either:
- * 1. A full QR Redirect URL ("https://.../?share=LHCAT1:...")
- * 2. A portable Share Token ("LHCAT1:...")
- * 3. A short code ("LH-123-456" or "123456") from the registry or matching active vault categories
+ * Decodes portable offline LHCAT1 tokens or cached share entries with strict HTTP/HTTPS sanitization.
  */
 export function decodeCategoryShareInput(
   rawInput: string,
-  existingCategories: Category[] = [],
-  existingLinks: LinkItem[] = []
+  _existingCategories: Category[] = [],
+  _existingLinks: LinkItem[] = []
 ): SharedCategoryBundle | null {
   let trimmed = rawInput.trim();
   if (!trimmed) return null;
 
-  // Extract ?share= parameter if input is a full URL
   if (/^https?:\/\//i.test(trimmed) || trimmed.includes('?share=') || trimmed.includes('&share=')) {
     try {
       const urlObj = new URL(trimmed, 'https://linkhub.cloud');
@@ -188,13 +397,11 @@ export function decodeCategoryShareInput(
     }
   }
 
-  // Also check if LHCAT1: is embedded inside the string
   const tokenIdx = trimmed.indexOf('LHCAT1:');
   if (tokenIdx > 0) {
     trimmed = trimmed.slice(tokenIdx).trim();
   }
 
-  // Case 1: Full portable LHCAT1 token
   if (trimmed.startsWith('LHCAT1:')) {
     try {
       const encoded = trimmed.slice('LHCAT1:'.length).trim();
@@ -203,42 +410,47 @@ export function decodeCategoryShareInput(
       if (parsed && typeof parsed.c === 'string' && Array.isArray(parsed.l)) {
         const links: SharedLinkEntry[] = parsed.l
           .filter((row: unknown) => Array.isArray(row) && row.length >= 2)
-          .map((row: string[]) => ({
-            title: String(row[0] || 'Shared Bookmark'),
-            url: String(row[1] || ''),
-            description: row[2] ? String(row[2]) : undefined,
-            tags: row[3]
-              ? String(row[3])
-                  .split(',')
-                  .map((t) => t.trim())
-                  .filter(Boolean)
-              : undefined,
-          }))
-          .filter((item: SharedLinkEntry) => Boolean(item.url));
+          .map((row: string[]) => {
+            const cleanUrl = sanitizeSharedHttpUrl(String(row[1] || ''));
+            if (!cleanUrl) return null;
+            return {
+              title: String(row[0] || 'Shared Bookmark').slice(0, 120),
+              url: cleanUrl,
+              description: row[2] ? String(row[2]).slice(0, 240) : undefined,
+              tags: row[3]
+                ? String(row[3])
+                    .split(',')
+                    .map((t) => t.trim())
+                    .filter(Boolean)
+                    .slice(0, 6)
+                : undefined,
+            };
+          })
+          .filter((item: SharedLinkEntry | null): item is SharedLinkEntry => Boolean(item));
 
-        const bundle: SharedCategoryBundle = {
+        if (links.length === 0) return null;
+
+        return {
           version: 1,
-          shortCode: parsed.s || generateCategoryShortCode(parsed.c, links),
-          categoryName: parsed.c,
-          categorySlug: parsed.c.toLowerCase().replace(/[^a-z0-9]+/g, '-'),
-          categoryIcon: parsed.i || 'folder',
-          categoryColor: parsed.k || '#ff9000',
+          readOnly: true,
+          shortCode: typeof parsed.s === 'string' ? parsed.s.slice(0, 20) : generateCategoryShortCode(),
+          categoryName: parsed.c.slice(0, 60),
+          categorySlug: parsed.c.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 60) || 'shared',
+          categoryIcon: typeof parsed.i === 'string' ? parsed.i.slice(0, 40) : 'folder',
+          categoryColor: typeof parsed.k === 'string' ? parsed.k.slice(0, 20) : '#ff9000',
           links,
           createdAt: Date.now(),
         };
-        registerSharedCategoryBundle(bundle);
-        return bundle;
       }
     } catch {
       return null;
     }
   }
 
-  // Case 2: Short Code lookup in localStorage registry
+  // Optional local registry lookup for previously created local offline shares
   const normalizedCode = trimmed.replace(/[^A-Z0-9]/gi, '').toUpperCase();
   const digitsOnly = normalizedCode.replace(/^LH/, '');
-
-  if (typeof window !== 'undefined') {
+  if (typeof window !== 'undefined' && normalizedCode) {
     try {
       const raw = localStorage.getItem(REGISTRY_STORAGE_KEY);
       if (raw) {
@@ -251,24 +463,9 @@ export function decodeCategoryShareInput(
     }
   }
 
-  // Case 3: Check if the short code matches any current category in the vault
-  for (const cat of existingCategories) {
-    const catLinks = existingLinks.filter((l) => l.categorySlug === cat.slug);
-    const { bundle } = encodeCategorySharePayload(cat, catLinks);
-    const candidateNorm = bundle.shortCode.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-    const candidateDigits = candidateNorm.replace(/^LH/, '');
-    if (normalizedCode === candidateNorm || (digitsOnly && digitsOnly === candidateDigits)) {
-      return bundle;
-    }
-  }
-
   return null;
 }
 
-/**
- * Stores a user's selected shared links before login so they are automatically imported
- * into the user's vault immediately upon authentication.
- */
 export function savePendingSharedImport(pending: PendingSharedImport): void {
   if (typeof window === 'undefined') return;
   try {

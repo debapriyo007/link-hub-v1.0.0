@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   Star,
   MoreVertical,
@@ -9,7 +9,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { LinkItem, Category } from '../types.ts';
-import { extractDomain } from '../utils/vaultLogic.ts';
+import { extractDomain, getFaviconCandidates } from '../utils/vaultLogic.ts';
 import { Card, CardBody, CardFooter } from './ui/Card.tsx';
 import { Button } from './ui/Button.tsx';
 import { IncognitoIcon } from './ui/IncognitoIcon.tsx';
@@ -39,10 +39,19 @@ export const LinkCard: React.FC<LinkCardProps> = React.memo(
     onShowIncognito,
   }) => {
     const [menuOpen, setMenuOpen] = useState(false);
-    const [imgError, setImgError] = useState(false);
+    const [faviconAttempt, setFaviconAttempt] = useState(0);
     const menuRef = useRef<HTMLDivElement>(null);
 
     const domain = extractDomain(link.url);
+    const faviconCandidates = useMemo(
+      () => getFaviconCandidates(link.url, link.faviconUrl),
+      [link.url, link.faviconUrl]
+    );
+    const activeFaviconSrc = faviconCandidates[faviconAttempt] || '';
+
+    useEffect(() => {
+      setFaviconAttempt(0);
+    }, [link.url, link.faviconUrl]);
 
     useEffect(() => {
       const handleClickOutside = (e: MouseEvent) => {
@@ -71,13 +80,13 @@ export const LinkCard: React.FC<LinkCardProps> = React.memo(
           <div className="flex items-start justify-between gap-2.5 sm:gap-3">
             {/* Favicon & Domain Badge */}
             <div className="flex items-center gap-2.5 min-w-0 flex-1">
-              <div className="w-9 h-9 rounded-lg glass-input flex items-center justify-center p-1.5 shrink-0 group-hover:border-[#ff9000]/40 transition-colors">
-                {link.faviconUrl && !imgError ? (
+              <div className="w-9 h-9 rounded-lg glass-input flex items-center justify-center p-1 shrink-0 group-hover:border-[#ff9000]/40 transition-colors overflow-hidden">
+                {activeFaviconSrc ? (
                   <img
-                    src={link.faviconUrl}
-                    alt={domain}
-                    onError={() => setImgError(true)}
-                    className="w-5 h-5 object-contain rounded-[4px] bg-white/90 p-0.5"
+                    src={activeFaviconSrc}
+                    alt={`${domain} icon`}
+                    onError={() => setFaviconAttempt((idx) => idx + 1)}
+                    className="w-6 h-6 object-contain rounded-[5px] bg-white/95 p-0.5 shadow-xs"
                     loading="lazy"
                     decoding="async"
                   />

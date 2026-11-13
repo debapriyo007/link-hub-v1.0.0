@@ -90,19 +90,23 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     const [timezone, setTimezone] = useState(user.countryCode || 'IST (GMT+05:30)');
     const [photoURL, setPhotoURL] = useState(user.photoURL || '');
 
-    // Security & PIN state
-    const [pinInput, setPinInput] = useState(user.pin || '');
+    // Security & PIN state (never pre-fill or echo plaintext secrets)
+    const hasConfiguredPin = Boolean(user.pinVerifier || user.pin);
+    const hasConfiguredRecoveryAnswer = Boolean(user.securityAnswerHash);
+    const [pinInput, setPinInput] = useState('');
     const [pinError, setPinError] = useState('');
     const initialQuestion =
       user.securityQuestion && SECURITY_QUESTIONS.includes(user.securityQuestion)
         ? user.securityQuestion
         : SECURITY_QUESTIONS[0];
     const [securityQuestion, setSecurityQuestion] = useState(initialQuestion);
-    const [securityAnswer, setSecurityAnswer] = useState(user.securityAnswer || user.email || '');
+    const [securityAnswer, setSecurityAnswer] = useState('');
 
     // Notification / Preference toggles
-    const [soundEffects, setSoundEffects] = useState(true);
-    const [autoLockOnTabSwitch, setAutoLockOnTabSwitch] = useState(true);
+    const [soundEffects, setSoundEffects] = useState(user.soundEnabled !== false);
+    const [autoLockOnTabSwitch, setAutoLockOnTabSwitch] = useState(
+      (user.autoLockMinutes ?? 1) > 0
+    );
     const [confettiOnSave, setConfettiOnSave] = useState(true);
 
     const [saving, setSaving] = useState(false);
@@ -166,11 +170,15 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       try {
         if (cleaned.length === 6) {
           await onSavePin(cleaned);
+          setPinInput('');
         }
         await onSaveProfile({
           securityQuestion: securityQuestion.trim(),
-          securityAnswer: securityAnswer.trim(),
-        });
+          ...(securityAnswer.trim() ? { securityAnswerPlain: securityAnswer.trim() } : {}),
+        } as Partial<UserProfile> & { securityAnswerPlain?: string });
+        if (securityAnswer.trim()) {
+          setSecurityAnswer('');
+        }
         triggerSavedMessage('Security & PIN recovery settings updated');
       } finally {
         setSaving(false);
@@ -317,7 +325,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className="text-xs text-zinc-400">
-                      {user.pin ? 'PIN Active' : 'Not Set'}
+                      {hasConfiguredPin ? 'PIN Active' : 'Not Set'}
                     </span>
                     <ChevronRight size={18} className="text-zinc-400" />
                   </div>
@@ -355,7 +363,9 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                     aria-checked={autoLockOnTabSwitch}
                     onClick={() => {
                       playRetroClick();
-                      setAutoLockOnTabSwitch(!autoLockOnTabSwitch);
+                      const next = !autoLockOnTabSwitch;
+                      setAutoLockOnTabSwitch(next);
+                      void onSaveProfile({ autoLockMinutes: next ? 1 : 0 });
                     }}
                     aria-label="Auto-Lock on Tab Switch"
                     className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
@@ -388,7 +398,9 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                     aria-checked={soundEffects}
                     onClick={() => {
                       playRetroClick();
-                      setSoundEffects(!soundEffects);
+                      const next = !soundEffects;
+                      setSoundEffects(next);
+                      void onSaveProfile({ soundEnabled: next });
                     }}
                     aria-label="Sound Effects"
                     className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
@@ -663,10 +675,14 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                       setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
                       setPinError('');
                     }}
-                    placeholder="Enter 6-digit numeric PIN"
+                    placeholder={
+                      hasConfiguredPin
+                        ? 'PIN active — enter new 6-digit PIN to change'
+                        : 'Enter 6-digit numeric PIN'
+                    }
                     className="flex-1 min-w-0 h-10 px-3 rounded-xl bg-[#16161d] border border-white/[0.09] focus:border-[#ff9000] text-xs text-white tracking-widest outline-none"
                   />
-                  {user.pin && (
+                  {hasConfiguredPin && (
                     <button
                       type="button"
                       onClick={async () => {
@@ -706,10 +722,14 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                   Recovery Answer
                 </label>
                 <input
-                  type="text"
+                  type="password"
                   value={securityAnswer}
                   onChange={(e) => setSecurityAnswer(e.target.value)}
-                  placeholder="Enter your recovery answer"
+                  placeholder={
+                    hasConfiguredRecoveryAnswer
+                      ? 'Recovery answer configured (enter new answer to update)'
+                      : 'Enter a secret recovery answer'
+                  }
                   className="w-full h-10 px-3 rounded-xl bg-[#16161d] border border-white/[0.09] focus:border-[#ff9000] text-xs text-white outline-none"
                 />
               </div>
@@ -1050,10 +1070,14 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                               setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
                               setPinError('');
                             }}
-                            placeholder="Enter 6-digit numeric PIN"
+                            placeholder={
+                              hasConfiguredPin
+                                ? 'PIN active — enter new 6-digit PIN to change'
+                                : 'Enter 6-digit numeric PIN'
+                            }
                             className="flex-1 min-w-0 h-10 px-3.5 rounded-lg bg-[#18181f] border border-white/[0.09] focus:border-[#ff9000] text-xs text-white tracking-widest outline-none transition-colors"
                           />
-                          {user.pin && (
+                          {hasConfiguredPin && (
                             <button
                               type="button"
                               onClick={async () => {
@@ -1105,10 +1129,14 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                             Recovery Answer
                           </label>
                           <input
-                            type="text"
+                            type="password"
                             value={securityAnswer}
                             onChange={(e) => setSecurityAnswer(e.target.value)}
-                            placeholder="Enter your recovery answer"
+                            placeholder={
+                              hasConfiguredRecoveryAnswer
+                                ? 'Recovery answer configured (enter new answer to update)'
+                                : 'Enter a secret recovery answer'
+                            }
                             className="w-full h-10 px-3.5 rounded-lg bg-[#18181f] border border-white/[0.09] focus:border-[#ff9000] text-xs text-white outline-none transition-colors"
                           />
                         </div>
@@ -1268,7 +1296,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                         </div>
                         <div className="min-w-0">
                           <div className="font-title text-xs font-semibold text-white">
-                            {user.pin ? 'Change Security PIN' : 'Set Security PIN'}
+                            {hasConfiguredPin ? 'Change Security PIN' : 'Set Security PIN'}
                           </div>
                           <p className="text-[11px] text-zinc-400 mt-0.5">
                             Configure your 6-digit PIN and security recovery question.
@@ -1283,7 +1311,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                         }}
                         className="inline-flex items-center justify-center h-9 px-4 rounded-lg bg-[#18181f] hover:bg-white/[0.08] border border-white/[0.1] text-white font-semibold text-xs transition-colors cursor-pointer shrink-0"
                       >
-                        {user.pin ? 'Change Security PIN' : 'Set Security PIN'}
+                        {hasConfiguredPin ? 'Change Security PIN' : 'Set Security PIN'}
                       </button>
                     </div>
 
@@ -1354,14 +1382,22 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                         desc: 'Automatically lock your active vault session whenever you switch to another browser tab.',
                         icon: LockKeyhole,
                         checked: autoLockOnTabSwitch,
-                        onChange: () => setAutoLockOnTabSwitch(!autoLockOnTabSwitch),
+                        onChange: () => {
+                          const next = !autoLockOnTabSwitch;
+                          setAutoLockOnTabSwitch(next);
+                          void onSaveProfile({ autoLockMinutes: next ? 1 : 0 });
+                        },
                       },
                       {
                         title: 'Tactile Sound Effects',
                         desc: 'Play subtle audio clicks when unlocking the vault or interacting with controls.',
                         icon: Volume2,
                         checked: soundEffects,
-                        onChange: () => setSoundEffects(!soundEffects),
+                        onChange: () => {
+                          const next = !soundEffects;
+                          setSoundEffects(next);
+                          void onSaveProfile({ soundEnabled: next });
+                        },
                       },
                       {
                         title: 'Celebration Confetti',

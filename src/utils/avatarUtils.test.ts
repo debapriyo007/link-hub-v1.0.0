@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { getUserInitials, formatNavbarUserName, MAX_AVATAR_URL_LENGTH } from './avatarUtils';
+import { getUserInitials, formatNavbarUserName, MAX_AVATAR_URL_LENGTH } from './avatarUtils.ts';
 
 test('getUserInitials extracts clean two-letter initials from multi-word name', () => {
   assert.equal(getUserInitials('Alex Dev', 'alex@linkhub.cloud'), 'AD');

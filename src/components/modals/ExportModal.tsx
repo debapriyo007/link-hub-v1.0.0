@@ -11,6 +11,7 @@ interface ExportModalProps {
   onClose: () => void;
   links: LinkItem[];
   categories: Category[];
+  lockedPrivateCount?: number;
   onShowToast: (msg: string) => void;
 }
 
@@ -19,6 +20,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({
   onClose,
   links,
   categories,
+  lockedPrivateCount = 0,
   onShowToast,
 }) => {
   const [format, setFormat] = useState<'json' | 'html' | 'text'>('json');
@@ -85,6 +87,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
       </ModalHeader>
 
       <ModalBody className="space-y-3">
+        {lockedPrivateCount > 0 && (
+          <div className="px-3 py-2 rounded-xl bg-[#ff9000]/10 border border-[#ff9000]/30 text-[11px] text-zinc-200 leading-snug">
+            {lockedPrivateCount} locked private link{lockedPrivateCount === 1 ? '' : 's'} omitted for security. Unlock a private category first if you want it included.
+          </div>
+        )}
         <label className="block text-xs font-semibold text-zinc-300">
           Select Export Format ({links.length} bookmarks)
         </label>

@@ -8,6 +8,7 @@ import {
   BookOpen,
 } from 'lucide-react';
 import { LinkItem } from '../../types.ts';
+import { getSecurityHeaders } from '../../firebase.ts';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal.tsx';
 import { Button } from '../ui/Button.tsx';
 import { Kbd } from '../ui/Kbd.tsx';
@@ -68,19 +69,39 @@ export const IncognitoModal: React.FC<IncognitoModalProps> = ({
     if (readerData || readerLoading) return;
     setReaderLoading(true);
     try {
+      const secHeaders = await getSecurityHeaders();
       const res = await fetch('/api/stealth/reader', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...secHeaders,
+        },
         body: JSON.stringify({ url: link.url }),
       });
-      const json: StealthReaderResult = await res.json();
-      setReaderData(json);
+      const json = (await res.json()) as Partial<StealthReaderResult> & { error?: string };
+      if (!res.ok) {
+        setReaderData({
+          ok: false,
+          domain: link.url,
+          paragraphs: [],
+          reason: json.error || 'Reader preview is unavailable for this request.',
+        });
+      } else {
+        setReaderData({
+          ok: Boolean(json.ok),
+          domain: json.domain || link.url,
+          title: json.title,
+          summary: json.summary,
+          paragraphs: Array.isArray(json.paragraphs) ? json.paragraphs : [],
+          reason: json.reason,
+        });
+      }
     } catch {
       setReaderData({
         ok: false,
         domain: link.url,
         paragraphs: [],
-        reason: 'Could not reach Stealth Reader right now.',
+        reason: 'Could not reach Reader Preview right now.',
       });
     } finally {
       setReaderLoading(false);
@@ -96,10 +117,10 @@ export const IncognitoModal: React.FC<IncognitoModalProps> = ({
           </div>
           <div className="min-w-0">
             <span className="font-title font-bold text-white tracking-tight text-sm block leading-tight">
-              Private / Incognito Launch
+              Private Launch &amp; Tracker-Free Preview
             </span>
             <span className="text-[11.5px] tracking-normal text-zinc-400 block leading-tight mt-0.5">
-              Zero browser history &bull; Zero vault tracking
+              Isolated no-referrer launch &bull; Zero click tracking
             </span>
           </div>
         </div>
@@ -154,10 +175,10 @@ export const IncognitoModal: React.FC<IncognitoModalProps> = ({
             </div>
             <div className="min-w-0 flex-1">
               <div className="text-xs font-title font-bold text-white">
-                Stealth Reader Preview
+                Tracker-Free Reader Preview
               </div>
               <p className="text-[11px] text-zinc-400 leading-snug mt-1">
-                Read cleanly inside LINKHUB without cookies, trackers, or browser history.
+                Preview page text safely without loading third-party scripts or cookies.
               </p>
             </div>
           </button>

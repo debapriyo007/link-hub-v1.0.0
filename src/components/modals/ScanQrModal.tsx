@@ -13,7 +13,8 @@ import {
   SharedCategoryBundle,
   SharedLinkEntry,
   decodeCategoryShareInput,
-  encodeCategorySharePayload,
+  extractServerShareToken,
+  resolveServerCategoryShare,
 } from '../../utils/categoryShare.ts';
 import { extractDomain } from '../../utils/vaultLogic.ts';
 import { playRetroClick, playRetroBeep, playRetroUnlockChime } from '../../utils/sound.ts';
@@ -29,6 +30,7 @@ interface ScanQrModalProps {
   links: LinkItem[];
   activeCategorySlug: string;
   initialBundle?: SharedCategoryBundle | null;
+  initialShareToken?: string | null;
   isAuthenticated?: boolean;
   onSaveSharedCategoryLinks: (
     sharedLinks: SharedLinkEntry[],
@@ -44,11 +46,16 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
   links,
   activeCategorySlug,
   initialBundle = null,
+  initialShareToken = null,
   isAuthenticated = true,
   onSaveSharedCategoryLinks,
 }) => {
   const [activeTab, setActiveTab] = useState<'code' | 'upload'>('code');
   const [inputCode, setInputCode] = useState('');
+  const [sharePassword, setSharePassword] = useState('');
+  const [passwordRequiredForToken, setPasswordRequiredForToken] = useState<string | null>(null);
+  const [passwordCategoryHint, setPasswordCategoryHint] = useState<string>('');
+  const [loadingShare, setLoadingShare] = useState(false);
   const [error, setError] = useState('');
   const [dragOver, setDragOver] = useState(false);
 
@@ -57,35 +64,11 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
   const [selectedLinkIndices, setSelectedLinkIndices] = useState<number[]>([]);
   const [targetCategorySlug, setTargetCategorySlug] = useState<string>('');
 
-  useEffect(() => {
-    if (isOpen) {
-      setInputCode('');
-      setError('');
-      if (initialBundle && initialBundle.links.length > 0) {
-        setDecodedBundle(initialBundle);
-        setSelectedLinkIndices(initialBundle.links.map((_, idx) => idx));
-        const matchingExisting = categories.find((c) => c.slug === initialBundle.categorySlug);
-        if (matchingExisting) {
-          setTargetCategorySlug(matchingExisting.slug);
-        } else {
-          setTargetCategorySlug('__create_new__');
-        }
-      } else {
-        setDecodedBundle(null);
-        const defaultCat =
-          activeCategorySlug !== 'all' && activeCategorySlug !== 'starred'
-            ? activeCategorySlug
-            : categories[0]?.slug || '__create_new__';
-        setTargetCategorySlug(defaultCat);
-      }
-    }
-  }, [isOpen, initialBundle, activeCategorySlug, categories]);
-
-  if (!isOpen) return null;
-
   const loadDecodedBundle = (bundle: SharedCategoryBundle) => {
     playRetroUnlockChime();
     setDecodedBundle(bundle);
+    setPasswordRequiredForToken(null);
+    setSharePassword('');
     setSelectedLinkIndices(bundle.links.map((_, idx) => idx));
     const matchingExisting = categories.find((c) => c.slug === bundle.categorySlug);
     if (matchingExisting) {
@@ -96,23 +79,88 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
     setError('');
   };
 
-  const handleCodeSubmit = (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    const clean = inputCode.trim();
+  useEffect(() => {
+    if (!isOpen) return;
+    setInputCode(initialShareToken || '');
+    setSharePassword('');
+    setPasswordRequiredForToken(null);
+    setPasswordCategoryHint('');
+    setError('');
+
+    if (initialBundle && initialBundle.links.length > 0) {
+      setDecodedBundle(initialBundle);
+      setSelectedLinkIndices(initialBundle.links.map((_, idx) => idx));
+      const matchingExisting = categories.find((c) => c.slug === initialBundle.categorySlug);
+      setTargetCategorySlug(matchingExisting ? matchingExisting.slug : '__create_new__');
+      return;
+    }
+
+    setDecodedBundle(null);
+    const defaultCat =
+      activeCategorySlug !== 'all' && activeCategorySlug !== 'starred'
+        ? activeCategorySlug
+        : categories[0]?.slug || '__create_new__';
+    setTargetCategorySlug(defaultCat);
+
+    if (initialShareToken) {
+      void resolveInputTokenOrCode(initialShareToken);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialBundle, initialShareToken]);
+
+  if (!isOpen) return null;
+
+  const resolveInputTokenOrCode = async (rawValue: string, candidatePassword?: string) => {
+    const clean = rawValue.trim();
     if (!clean) {
-      setError('Please enter a valid share code or link.');
+      setError('Please enter a valid share token, link, or QR image.');
       playRetroBeep();
       return;
+    }
+
+    const serverToken = extractServerShareToken(clean);
+    if (serverToken) {
+      setLoadingShare(true);
+      setError('');
+      try {
+        const result = await resolveServerCategoryShare(serverToken, candidatePassword);
+        if (result.status === 'ok') {
+          loadDecodedBundle(result.bundle);
+          return;
+        }
+        if (result.status === 'password_required') {
+          setPasswordRequiredForToken(serverToken);
+          setPasswordCategoryHint(result.categoryName || 'Protected Shared Collection');
+          if (result.error) {
+            setError(result.error);
+            playRetroBeep();
+          }
+          return;
+        }
+        setError(result.error);
+        playRetroBeep();
+        return;
+      } finally {
+        setLoadingShare(false);
+      }
     }
 
     const decoded = decodeCategoryShareInput(clean, categories, links);
     if (!decoded || decoded.links.length === 0) {
-      setError('Share code not found. Please check the code and try again.');
+      setError('Share token not found or invalid. Please check and try again.');
       playRetroBeep();
       return;
     }
-
     loadDecodedBundle(decoded);
+  };
+
+  const handleCodeSubmit = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (passwordRequiredForToken) {
+      await resolveInputTokenOrCode(passwordRequiredForToken, sharePassword);
+      return;
+    }
+    await resolveInputTokenOrCode(inputCode);
   };
 
   const decodeQrFromImageFile = async (file: File) => {
@@ -124,43 +172,23 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
         const detector = new window.BarcodeDetector({ formats: ['qr_code'] });
         const results = await detector.detect(bitmap);
         if (results && results.length > 0 && results[0].rawValue) {
-          const decoded = decodeCategoryShareInput(results[0].rawValue, categories, links);
-          if (decoded) {
-            loadDecodedBundle(decoded);
-            return;
-          }
+          await resolveInputTokenOrCode(results[0].rawValue);
+          return;
         }
       }
     } catch {
-      // Fall through to filename / registry match
+      // Browser QR decoding failed or unavailable
     }
 
-    const codeMatch = file.name.match(/LH-\d{3}-\d{3}/i);
-    if (codeMatch) {
-      const decoded = decodeCategoryShareInput(codeMatch[0], categories, links);
-      if (decoded) {
-        loadDecodedBundle(decoded);
-        return;
-      }
-    }
-
-    const fallbackCat = categories[0];
-    if (fallbackCat && links.length > 0) {
-      const catLinks = links.filter((l) => l.categorySlug === fallbackCat.slug);
-      const { bundle } = encodeCategorySharePayload(
-        fallbackCat,
-        catLinks.length > 0 ? catLinks : links.slice(0, 4)
-      );
-      loadDecodedBundle(bundle);
-    } else {
-      setError('Could not read QR image. Try entering the share code instead.');
-    }
+    // Security fix: Never substitute arbitrary local categories when QR reading fails
+    playRetroBeep();
+    setError('Could not read a valid LINKHUB QR code from that image. Paste the share token or link instead.');
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      decodeQrFromImageFile(file);
+      void decodeQrFromImageFile(file);
     }
   };
 
@@ -169,7 +197,7 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
     setDragOver(false);
     const file = e.dataTransfer.files?.[0];
     if (file) {
-      decodeQrFromImageFile(file);
+      void decodeQrFromImageFile(file);
     }
   };
 
@@ -226,12 +254,40 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
         <span className="font-title font-bold text-white tracking-tight text-sm">
           {decodedBundle
             ? `Shared Category: ${decodedBundle.categoryName}`
-            : 'Import Shared Category'}
+            : passwordRequiredForToken
+              ? `Unlock Shared Category`
+              : 'Import Shared Category'}
         </span>
       </ModalHeader>
 
       <ModalBody className="space-y-3.5">
-        {!decodedBundle ? (
+        {passwordRequiredForToken && !decodedBundle ? (
+          <form onSubmit={handleCodeSubmit} className="space-y-3 pt-1">
+            <div className="p-3 rounded-xl bg-[#ff9000]/10 border border-[#ff9000]/30 flex items-center gap-2.5 text-left">
+              <LockKeyhole size={15} className="text-[#ff9000] shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-bold text-white truncate">
+                  {passwordCategoryHint}
+                </div>
+                <p className="text-[11px] text-zinc-300">
+                  This shared collection is protected by a password.
+                </p>
+              </div>
+            </div>
+            <Input
+              label="Share Password"
+              type="password"
+              placeholder="Enter share password..."
+              value={sharePassword}
+              onChange={(e) => {
+                setSharePassword(e.target.value);
+                setError('');
+              }}
+              errorMessage={error}
+              autoFocus
+            />
+          </form>
+        ) : !decodedBundle ? (
           <>
             {/* Compact Segmented Tab Bar */}
             <div className="grid grid-cols-2 p-1 rounded-xl bg-white/[0.03] border border-white/[0.08]">
@@ -248,7 +304,7 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Enter Code / Link
+                Enter Token / Link
               </button>
               <button
                 type="button"
@@ -270,8 +326,8 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
             {activeTab === 'code' ? (
               <form onSubmit={handleCodeSubmit} className="pt-0.5">
                 <Input
-                  label="Share Code or Link"
-                  placeholder="Enter share code (e.g. LH-256-950) or link"
+                  label="Share Token or Link"
+                  placeholder="Enter share token (e.g. lh2_...) or URL"
                   value={inputCode}
                   onChange={(e) => {
                     setInputCode(e.target.value);
@@ -324,10 +380,10 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
             <div className="p-3 rounded-xl bg-white/[0.03] border border-white/[0.08] flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="text-[10px] font-bold uppercase tracking-widest text-[#ff9000]">
-                  Shared Collection ({decodedBundle.shortCode})
+                  Shared Collection (Read-Only)
                 </div>
                 <div className="font-title font-bold text-xs text-white mt-0.5 truncate">
-                  {decodedBundle.categoryName} • {decodedBundle.links.length} Bookmark
+                  {decodedBundle.categoryName} &bull; {decodedBundle.links.length} Bookmark
                   {decodedBundle.links.length === 1 ? '' : 's'}
                 </div>
               </div>
@@ -447,14 +503,19 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
         <Button variant="flat" color="default" size="sm" onClick={onClose}>
           Cancel
         </Button>
-        {!decodedBundle && activeTab === 'code' && (
+        {!decodedBundle && (passwordRequiredForToken || activeTab === 'code') && (
           <Button
             color="primary"
             variant="solid"
             size="sm"
-            onClick={() => handleCodeSubmit()}
+            onClick={() => void handleCodeSubmit()}
+            disabled={loadingShare}
           >
-            Load Links
+            {loadingShare
+              ? 'Loading...'
+              : passwordRequiredForToken
+                ? 'Unlock Share'
+                : 'Load Links'}
           </Button>
         )}
         {decodedBundle && (

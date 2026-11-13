@@ -8,10 +8,14 @@ service cloud.firestore {
     }
 
     // =========================================================================
-    // Global Hardened Primitives
+    // Global Hardened Primitives (LinkHub v2.0.0 — Zero-Trust)
     // =========================================================================
     function isValidId(id) {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidShareToken(id) {
+      return id is string && id.size() >= 22 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
     function incoming() {
@@ -22,15 +26,25 @@ service cloud.firestore {
       return resource.data;
     }
 
+    // Enforce verified email across ALL authentication providers (including password)
     function isSignedIn() {
-      return request.auth != null && (
-        request.auth.token.email_verified == true ||
-        request.auth.token.firebase.sign_in_provider == 'password'
-      );
+      return request.auth != null && request.auth.token.email_verified == true;
     }
 
     function isOwner(userId) {
       return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function parentUserExists(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId));
+    }
+
+    // Explicitly block privilege-escalation fields from ever appearing in client documents
+    function hasNoPrivilegeFields(data) {
+      return !data.keys().hasAny([
+        'role', 'roles', 'isAdmin', 'admin', 'isPremium', 'premium',
+        'subscription', 'plan', 'tier', 'billingStatus', 'entitlements', 'stripeCustomerId'
+      ]);
     }
 
     // =========================================================================
@@ -38,7 +52,11 @@ service cloud.firestore {
     // =========================================================================
     function isValidUserProfile(data, userId) {
       return data.keys().hasAll(['uid', 'email', 'displayName', 'photoURL', 'pin', 'createdAt', 'updatedAt'])
-        && data.keys().hasOnly(['uid', 'email', 'displayName', 'photoURL', 'pin', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'pin',
+          'pinVerifier', 'vaultVersion', 'createdAt', 'updatedAt'
+        ])
+        && hasNoPrivilegeFields(data)
         && data.uid is string
         && data.uid == userId
         && data.uid == request.auth.uid
@@ -56,6 +74,38 @@ service cloud.firestore {
         && data.pin is string
         && data.pin.size() <= 6
         && data.pin.matches('^([0-9]{6})?$')
+        && (!('pinVerifier' in data) || (data.pinVerifier is string && data.pinVerifier.size() <= 256))
+        && (!('vaultVersion' in data) || (data.vaultVersion is number && data.vaultVersion >= 1 && data.vaultVersion <= 10))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserPreferences(data, userId, prefId) {
+      return data.keys().hasAll(['id', 'userId', 'createdAt', 'updatedAt'])
+        && data.keys().hasOnly([
+          'id', 'userId', 'firstName', 'lastName', 'countryCode',
+          'autoLockMinutes', 'soundEnabled', 'securityQuestion',
+          'securityAnswerHash', 'createdAt', 'updatedAt'
+        ])
+        && hasNoPrivilegeFields(data)
+        && data.id is string
+        && data.id == prefId
+        && data.id.size() >= 1
+        && data.id.size() <= 64
+        && data.id.matches('^[a-zA-Z0-9_\\-]+$')
+        && data.userId is string
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.userId.size() >= 1
+        && data.userId.size() <= 128
+        && data.userId.matches('^[a-zA-Z0-9_\\-]+$')
+        && (!('firstName' in data) || (data.firstName is string && data.firstName.size() <= 60))
+        && (!('lastName' in data) || (data.lastName is string && data.lastName.size() <= 60))
+        && (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 40))
+        && (!('autoLockMinutes' in data) || (data.autoLockMinutes is number && data.autoLockMinutes >= 0 && data.autoLockMinutes <= 1440))
+        && (!('soundEnabled' in data) || data.soundEnabled is bool)
+        && (!('securityQuestion' in data) || (data.securityQuestion is string && data.securityQuestion.size() <= 160))
+        && (!('securityAnswerHash' in data) || (data.securityAnswerHash is string && data.securityAnswerHash.size() <= 256))
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -67,8 +117,10 @@ service cloud.firestore {
         ])
         && data.keys().hasOnly([
           'id', 'userId', 'name', 'slug', 'color', 'icon',
-          'description', 'isDefault', 'order', 'createdAt', 'updatedAt'
+          'description', 'isDefault', 'isPrivate', 'privateVaultMeta',
+          'order', 'createdAt', 'updatedAt'
         ])
+        && hasNoPrivilegeFields(data)
         && data.id is string
         && data.id == categoryId
         && data.id.size() >= 1
@@ -82,7 +134,7 @@ service cloud.firestore {
         && data.userId.matches('^[a-zA-Z0-9_\\-]+$')
         && data.name is string
         && data.name.size() >= 1
-        && data.name.size() <= 60
+        && data.name.size() <= 240
         && data.slug is string
         && data.slug.size() >= 1
         && data.slug.size() <= 60
@@ -94,8 +146,10 @@ service cloud.firestore {
         && data.icon.size() >= 1
         && data.icon.size() <= 40
         && data.description is string
-        && data.description.size() <= 240
+        && data.description.size() <= 1024
         && data.isDefault is bool
+        && (!('isPrivate' in data) || data.isPrivate is bool)
+        && (!('privateVaultMeta' in data) || (data.privateVaultMeta is string && data.privateVaultMeta.size() <= 1024))
         && data.order is number
         && data.order >= 0
         && data.order <= 10000
@@ -112,8 +166,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'id', 'userId', 'title', 'url', 'categorySlug', 'description',
           'tags', 'isFavorite', 'clickCount', 'imageUrl', 'faviconUrl',
-          'createdAt', 'updatedAt'
+          'isEncrypted', 'cryptoVersion', 'createdAt', 'updatedAt'
         ])
+        && hasNoPrivilegeFields(data)
         && data.id is string
         && data.id == linkId
         && data.id.size() >= 1
@@ -127,16 +182,17 @@ service cloud.firestore {
         && data.userId.matches('^[a-zA-Z0-9_\\-]+$')
         && data.title is string
         && data.title.size() >= 1
-        && data.title.size() <= 160
+        && data.title.size() <= 512
         && data.url is string
         && data.url.size() >= 4
-        && data.url.size() <= 2048
+        && data.url.size() <= 4096
+        && data.url.matches('^https?://.*')
         && data.categorySlug is string
         && data.categorySlug.size() >= 1
         && data.categorySlug.size() <= 60
         && data.categorySlug.matches('^[a-zA-Z0-9_\\-]+$')
         && data.description is string
-        && data.description.size() <= 500
+        && data.description.size() <= 2048
         && data.tags is list
         && data.tags.size() <= 10
         && (data.tags.size() == 0 || (data.tags[0] is string && data.tags[0].size() >= 1 && data.tags[0].size() <= 40))
@@ -146,8 +202,57 @@ service cloud.firestore {
         && data.clickCount <= 100000000
         && data.imageUrl is string
         && data.imageUrl.size() <= 2048
+        && (data.imageUrl.size() == 0 || data.imageUrl.matches('^https?://.*'))
         && data.faviconUrl is string
         && data.faviconUrl.size() <= 2048
+        && (data.faviconUrl.size() == 0 || data.faviconUrl.matches('^https?://.*'))
+        && (!('isEncrypted' in data) || data.isEncrypted is bool)
+        && (!('cryptoVersion' in data) || (data.cryptoVersion is number && data.cryptoVersion >= 1 && data.cryptoVersion <= 10))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidShareRecord(data, shareId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'categoryName', 'categorySlug',
+          'readOnly', 'hasPassword', 'revoked', 'links',
+          'expiresAt', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'categoryName', 'categorySlug',
+          'categoryIcon', 'categoryColor', 'readOnly', 'hasPassword',
+          'revoked', 'linkCount', 'links', 'expiresAt', 'createdAt', 'updatedAt'
+        ])
+        && hasNoPrivilegeFields(data)
+        && data.id is string
+        && data.id == shareId
+        && isValidShareToken(data.id)
+        && data.ownerId is string
+        && data.ownerId == request.auth.uid
+        && isValidId(data.ownerId)
+        && data.categoryName is string
+        && data.categoryName.size() >= 1
+        && data.categoryName.size() <= 60
+        && data.categorySlug is string
+        && data.categorySlug.size() >= 1
+        && data.categorySlug.size() <= 60
+        && data.categorySlug.matches('^[a-zA-Z0-9_\\-]+$')
+        && (!('categoryIcon' in data) || (data.categoryIcon is string && data.categoryIcon.size() >= 1 && data.categoryIcon.size() <= 40))
+        && (!('categoryColor' in data) || (data.categoryColor is string && data.categoryColor.size() >= 4 && data.categoryColor.size() <= 20))
+        && data.readOnly == true
+        && data.hasPassword is bool
+        && data.revoked is bool
+        && (!('linkCount' in data) || (data.linkCount is number && data.linkCount >= 0 && data.linkCount <= 40))
+        && data.links is list
+        && data.links.size() >= 1
+        && data.links.size() <= 40
+        && data.links[0] is map
+        && data.links[0].keys().hasOnly(['title', 'url', 'description', 'tags'])
+        && data.links[0].url is string
+        && data.links[0].url.size() >= 4
+        && data.links[0].url.size() <= 2048
+        && data.links[0].url.matches('^https?://.*')
+        && data.expiresAt is timestamp
         && data.createdAt is timestamp
         && data.updatedAt is timestamp;
     }
@@ -170,9 +275,54 @@ service cloud.firestore {
         && isValidUserProfile(incoming(), userId)
         && incoming().uid == existing().uid
         && incoming().createdAt == existing().createdAt
-        && incoming().updatedAt == request.time;
+        && incoming().updatedAt == request.time
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['pin', 'pinVerifier', 'vaultVersion', 'updatedAt'])
+          || incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'email', 'photoURL', 'pin', 'pinVerifier', 'vaultVersion', 'updatedAt'])
+        );
 
       allow delete: if false;
+
+      // =======================================================================
+      // Subcollection: /users/{userId}/preferences/{prefId}
+      // =======================================================================
+      match /preferences/{prefId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(prefId);
+        allow list: if false;
+
+        allow create: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(prefId)
+          && isValidUserPreferences(incoming(), userId, prefId)
+          && parentUserExists(userId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time;
+
+        allow update: if isOwner(userId)
+          && isValidId(userId)
+          && isValidId(prefId)
+          && isValidUserPreferences(incoming(), userId, prefId)
+          && incoming().id == existing().id
+          && incoming().userId == existing().userId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && incoming().diff(existing()).affectedKeys().hasOnly([
+            'firstName', 'lastName', 'countryCode', 'autoLockMinutes',
+            'soundEnabled', 'securityQuestion', 'securityAnswerHash', 'updatedAt'
+          ]);
+
+        allow delete: if isOwner(userId) && isValidId(userId) && isValidId(prefId);
+      }
+
+      // =======================================================================
+      // Subcollection: /users/{userId}/entitlements/{entitlementId} (SERVER-ONLY WRITES)
+      // =======================================================================
+      match /entitlements/{entitlementId} {
+        allow get: if isOwner(userId) && isValidId(userId) && isValidId(entitlementId);
+        allow list: if isOwner(userId) && isValidId(userId);
+        allow create, update, delete: if false;
+      }
 
       // =======================================================================
       // Subcollection: /users/{userId}/categories/{categoryId}
@@ -183,12 +333,14 @@ service cloud.firestore {
           && isValidId(categoryId);
 
         allow list: if isOwner(userId)
-          && isValidId(userId);
+          && isValidId(userId)
+          && resource.data.userId == request.auth.uid;
 
         allow create: if isOwner(userId)
           && isValidId(userId)
           && isValidId(categoryId)
           && isValidCategory(incoming(), userId, categoryId)
+          && parentUserExists(userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time;
 
@@ -199,7 +351,14 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt
-          && incoming().updatedAt == request.time;
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['order', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'slug', 'color', 'icon', 'description',
+              'isPrivate', 'privateVaultMeta', 'order', 'updatedAt'
+            ])
+          );
 
         allow delete: if isOwner(userId)
           && isValidId(userId)
@@ -216,12 +375,14 @@ service cloud.firestore {
           && isValidId(linkId);
 
         allow list: if isOwner(userId)
-          && isValidId(userId);
+          && isValidId(userId)
+          && resource.data.userId == request.auth.uid;
 
         allow create: if isOwner(userId)
           && isValidId(userId)
           && isValidId(linkId)
           && isValidLinkItem(incoming(), userId, linkId)
+          && parentUserExists(userId)
           && incoming().createdAt == request.time
           && incoming().updatedAt == request.time;
 
@@ -232,12 +393,64 @@ service cloud.firestore {
           && incoming().id == existing().id
           && incoming().userId == existing().userId
           && incoming().createdAt == existing().createdAt
-          && incoming().updatedAt == request.time;
+          && incoming().updatedAt == request.time
+          && (
+            incoming().diff(existing()).affectedKeys().hasOnly(['isFavorite', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['clickCount', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly(['categorySlug', 'updatedAt'])
+            || incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'url', 'categorySlug', 'description', 'tags',
+              'isFavorite', 'imageUrl', 'faviconUrl', 'isEncrypted', 'cryptoVersion', 'updatedAt'
+            ])
+          );
 
         allow delete: if isOwner(userId)
           && isValidId(userId)
           && isValidId(linkId);
       }
+    }
+
+    // =========================================================================
+    // Collection Rules: /shares/{shareId}
+    // =========================================================================
+    match /shares/{shareId} {
+      // Public share resolution for non-password, unrevoked, unexpired shares requires signed-in verified user;
+      // Password-protected shares must be redeemed through the backend API (/api/shares/:token).
+      allow get: if isValidShareToken(shareId) && (
+        (isSignedIn() && resource.data.ownerId == request.auth.uid)
+        || (
+          isSignedIn()
+          && resource.data.revoked == false
+          && resource.data.hasPassword == false
+          && resource.data.expiresAt > request.time
+        )
+      );
+
+      // Owners may list only their own created shares
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      allow create: if isSignedIn()
+        && isValidShareToken(shareId)
+        && isValidShareRecord(incoming(), shareId)
+        && parentUserExists(request.auth.uid)
+        && incoming().revoked == false
+        && incoming().expiresAt > request.time
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn()
+        && isValidShareToken(shareId)
+        && isValidShareRecord(incoming(), shareId)
+        && existing().ownerId == request.auth.uid
+        && incoming().id == existing().id
+        && incoming().ownerId == existing().ownerId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && incoming().diff(existing()).affectedKeys().hasOnly(['revoked', 'expiresAt', 'updatedAt']);
+
+      allow delete: if isSignedIn()
+        && isValidShareToken(shareId)
+        && existing().ownerId == request.auth.uid;
     }
   }
 }

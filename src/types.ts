@@ -13,6 +13,7 @@ export interface LinkItem {
   createdAt: number;
   updatedAt: number;
   isEncrypted?: boolean;
+  cryptoVersion?: number;
 }
 
 export interface Category {
@@ -28,15 +29,19 @@ export interface Category {
   order: number;
   isPrivate?: boolean;
   privatePinHash?: string;
+  privateVaultMeta?: string;
   privatePin?: string;
 }
 
 export interface UserProfile {
   uid: string;
   email: string;
+  emailVerified?: boolean;
   displayName: string;
   photoURL: string;
   pin: string;
+  pinVerifier?: string;
+  vaultVersion?: number;
   firstName?: string;
   lastName?: string;
   phone?: string;
@@ -45,7 +50,19 @@ export interface UserProfile {
   company?: string;
   bio?: string;
   securityQuestion?: string;
-  securityAnswer?: string;
+  securityAnswerHash?: string;
+  autoLockMinutes?: number;
+  soundEnabled?: boolean;
+}
+
+export interface UserEntitlement {
+  id: string;
+  userId: string;
+  plan: 'free' | 'pro' | 'team';
+  status: 'active' | 'canceled' | 'past_due' | 'expired';
+  provider: string;
+  expiresAt?: number;
+  updatedAt: number;
 }
 
 export type ViewMode = 'grid' | 'list' | 'table';
