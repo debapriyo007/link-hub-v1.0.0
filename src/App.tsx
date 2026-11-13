@@ -3,7 +3,6 @@ import confetti from 'canvas-confetti';
 import {
   Star,
   BookmarkPlus,
-  Search,
   Upload,
   Instagram,
   Github,
@@ -16,6 +15,8 @@ import {
   LockKeyhole,
   ShieldCheck,
 } from 'lucide-react';
+import { BsBookmarks } from 'react-icons/bs';
+import { TbBookmarksOff } from 'react-icons/tb';
 import { LinkItem, Category, SortOption, UserProfile } from './types.ts';
 import { INITIAL_LINKS, INITIAL_CATEGORIES } from './data/initialData.ts';
 import { filterAndSortLinks } from './utils/vaultLogic.ts';
@@ -1950,11 +1951,44 @@ export default function App() {
           {/* Links Display (Card Format Only) */}
           {filteredLinks.length === 0 ? (
             <div className="w-full glass-panel rounded-2xl p-8 sm:p-12 flex flex-col items-center justify-center text-center">
-              <div className="w-14 h-14 rounded-xl glass-input flex items-center justify-center text-[#ff9000] mb-3">
-                <Search size={24} />
+              <div className="relative mb-5 flex items-center justify-center">
+                <div
+                  aria-hidden="true"
+                  className="empty-badge-glow pointer-events-none absolute h-24 w-24 rounded-full bg-[#ff9000]/18 blur-2xl"
+                />
+                <div className="relative flex h-20 w-20 items-center justify-center rounded-3xl">
+                  <div
+                    aria-hidden="true"
+                    className="empty-ring-pulse pointer-events-none absolute inset-0 rounded-3xl border border-[#ff9000]/30"
+                  />
+                  <div
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 overflow-hidden rounded-3xl p-[1px]"
+                  >
+                    <div
+                      className="empty-orbit-sweep absolute -inset-[55%] opacity-80"
+                      style={{
+                        background:
+                          'conic-gradient(from 0deg, transparent 0deg, transparent 250deg, rgba(255, 144, 0, 0.55) 315deg, rgba(255, 195, 110, 0.8) 340deg, transparent 360deg)',
+                      }}
+                    />
+                    <div className="relative h-full w-full rounded-[23px] border border-white/[0.05] bg-[#14151b]/95" />
+                  </div>
+                  <div className="relative z-10 flex h-14 w-14 items-center justify-center rounded-2xl border border-[#ff9000]/25 bg-gradient-to-b from-[#1f212b] to-[#13141a] text-[#ff9000] shadow-[0_10px_24px_rgba(0,0,0,0.45),inset_0_1px_0_rgba(255,255,255,0.1)]">
+                    <span className="empty-icon-float inline-flex items-center justify-center">
+                      {searchQuery || activeTag || starredOnly ? (
+                        <TbBookmarksOff size={26} strokeWidth={1.75} aria-hidden="true" />
+                      ) : (
+                        <BsBookmarks size={24} aria-hidden="true" />
+                      )}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <h3 className="text-base font-bold text-white mb-1">No Bookmarks Found</h3>
-              <p className="text-xs text-zinc-400 max-w-sm mb-6">
+              <h3 className="text-base sm:text-lg font-bold text-white tracking-tight mb-1.5">
+                No Bookmarks Found
+              </h3>
+              <p className="text-xs sm:text-[13px] text-zinc-400 max-w-sm mb-6 leading-relaxed">
                 {searchQuery || activeTag || starredOnly
                   ? 'No saved bookmarks match your current search criteria or tags.'
                   : 'Your cloud vault is currently empty for this category. Add a link or import your browser bookmarks.'}

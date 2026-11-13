@@ -211,10 +211,77 @@ h3,
   animation: lock-stage-zoom-in 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
+/* Empty State Layered Icon Badge Animations (GPU-Composited) */
+@keyframes empty-badge-glow {
+  0%, 100% {
+    opacity: 0.55;
+    transform: scale3d(0.94, 0.94, 1);
+  }
+  50% {
+    opacity: 0.95;
+    transform: scale3d(1.12, 1.12, 1);
+  }
+}
+
+@keyframes empty-ring-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale3d(0.98, 0.98, 1);
+  }
+  70%, 100% {
+    opacity: 0;
+    transform: scale3d(1.38, 1.38, 1);
+  }
+}
+
+@keyframes empty-orbit-sweep {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes empty-icon-float {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -2.5px, 0);
+  }
+}
+
+.empty-badge-glow {
+  will-change: transform, opacity;
+  animation: empty-badge-glow 3.8s ease-in-out infinite;
+}
+
+.empty-ring-pulse {
+  will-change: transform, opacity;
+  animation: empty-ring-pulse 3.2s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+.empty-orbit-sweep {
+  will-change: transform;
+  animation: empty-orbit-sweep 6.5s linear infinite;
+}
+
+.empty-icon-float {
+  will-change: transform;
+  animation: empty-icon-float 3.8s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .lock-stage-zoom-in {
+  .lock-stage-zoom-in,
+  .empty-badge-glow,
+  .empty-ring-pulse,
+  .empty-orbit-sweep,
+  .empty-icon-float {
     animation: none !important;
     transform: none !important;
+  }
+  .lock-stage-zoom-in {
     opacity: 1 !important;
   }
 }
