@@ -175,6 +175,62 @@ function evaluateReadShare(
   return 'PERMISSION_DENIED';
 }
 
+function evaluateCreateCategory(
+  auth: AuthContext | null,
+  userId: string,
+  categoryId: string,
+  parentExists: boolean,
+  data: Record<string, unknown>,
+  requestTime: number
+): 'ALLOWED' | 'PERMISSION_DENIED' {
+  if (!isOwner(auth, userId) || !isValidId(userId) || !isValidId(categoryId) || !parentExists) {
+    return 'PERMISSION_DENIED';
+  }
+  if (!hasNoPrivilegeFields(data)) return 'PERMISSION_DENIED';
+  const required = [
+    'id', 'userId', 'name', 'slug', 'color', 'icon',
+    'description', 'isDefault', 'order', 'createdAt', 'updatedAt',
+  ];
+  const allowed = [...required, 'isPrivate', 'privateVaultMeta'];
+  if (!hasAllowedKeys(data, required, allowed)) return 'PERMISSION_DENIED';
+  if (data.id !== categoryId || !isValidId(data.id)) return 'PERMISSION_DENIED';
+  if (data.userId !== userId || data.userId !== auth?.uid || !isValidId(data.userId)) return 'PERMISSION_DENIED';
+  if (typeof data.name !== 'string' || data.name.length < 1 || data.name.length > 240) return 'PERMISSION_DENIED';
+  if (typeof data.slug !== 'string' || data.slug.length < 1 || data.slug.length > 60 || !ID_REGEX.test(data.slug)) return 'PERMISSION_DENIED';
+  if (typeof data.color !== 'string' || data.color.length < 4 || data.color.length > 20) return 'PERMISSION_DENIED';
+  if (typeof data.icon !== 'string' || data.icon.length < 1 || data.icon.length > 40) return 'PERMISSION_DENIED';
+  if (typeof data.description !== 'string' || data.description.length > 1024) return 'PERMISSION_DENIED';
+  if (typeof data.isDefault !== 'boolean') return 'PERMISSION_DENIED';
+  if ('isPrivate' in data && typeof data.isPrivate !== 'boolean') return 'PERMISSION_DENIED';
+  if ('privateVaultMeta' in data && (typeof data.privateVaultMeta !== 'string' || data.privateVaultMeta.length > 4096)) {
+    return 'PERMISSION_DENIED';
+  }
+  if (typeof data.order !== 'number' || data.order < 0 || data.order > 10000) return 'PERMISSION_DENIED';
+  if (data.createdAt !== requestTime || data.updatedAt !== requestTime) return 'PERMISSION_DENIED';
+  return 'ALLOWED';
+}
+
+function evaluateDeleteCategory(
+  auth: AuthContext | null,
+  userId: string,
+  categoryId: string,
+  existing: { isDefault: boolean }
+): 'ALLOWED' | 'PERMISSION_DENIED' {
+  if (!isOwner(auth, userId) || !isValidId(userId) || !isValidId(categoryId)) return 'PERMISSION_DENIED';
+  return existing.isDefault === false ? 'ALLOWED' : 'PERMISSION_DENIED';
+}
+
+function evaluateListUserCollection(
+  auth: AuthContext | null,
+  userId: string,
+  queryFilterUserId: string | null
+): 'ALLOWED' | 'PERMISSION_DENIED' {
+  if (!isOwner(auth, userId) || !isValidId(userId)) return 'PERMISSION_DENIED';
+  return queryFilterUserId !== null && queryFilterUserId === auth!.uid
+    ? 'ALLOWED'
+    : 'PERMISSION_DENIED';
+}
+
 const NOW = 1762800000000;
 const VALID_LINK = {
   id: 'link_1',
@@ -436,3 +492,82 @@ test('v2 Hardening #16: Valid encrypted v2 link with PBKDF2 pinVerifier is ALLOW
   );
   assert.equal(linkRes, 'ALLOWED');
 });
+
+test('Category Rules: verified owner can create standard and large-envelope private categories, while orphaned or default-delete writes are denied', () => {
+  const validCat = {
+    id: 'cat-1762800000000-ab12',
+    userId: 'user_1',
+    name: 'Research Vault',
+    slug: 'research-vault',
+    color: '#ff9000',
+    icon: 'compass',
+    description: 'Deep technical papers',
+    isDefault: false,
+    isPrivate: false,
+    privateVaultMeta: '',
+    order: 5,
+    createdAt: NOW,
+    updatedAt: NOW,
+  };
+
+  assert.equal(
+    evaluateCreateCategory({ uid: 'user_1', email_verified: true }, 'user_1', validCat.id, true, validCat, NOW),
+    'ALLOWED'
+  );
+  // Private category with >1024 char AES-256-GCM envelope (e.g. 1600 chars) must succeed (<= 4096)
+  assert.equal(
+    evaluateCreateCategory(
+      { uid: 'user_1', email_verified: true },
+      'user_1',
+      validCat.id,
+      true,
+      {
+        ...validCat,
+        isPrivate: true,
+        description: '[Encrypted Private Vault]',
+        privateVaultMeta: 'LHPRIV2:' + 'A'.repeat(1600),
+      },
+      NOW
+    ),
+    'ALLOWED'
+  );
+  // Missing parent user doc must be denied
+  assert.equal(
+    evaluateCreateCategory({ uid: 'user_1', email_verified: true }, 'user_1', validCat.id, false, validCat, NOW),
+    'PERMISSION_DENIED'
+  );
+  // Non-default category delete allowed; default category delete denied
+  assert.equal(
+    evaluateDeleteCategory({ uid: 'user_1', email_verified: true }, 'user_1', validCat.id, { isDefault: false }),
+    'ALLOWED'
+  );
+  assert.equal(
+    evaluateDeleteCategory({ uid: 'user_1', email_verified: true }, 'user_1', 'study', { isDefault: true }),
+    'PERMISSION_DENIED'
+  );
+});
+
+test('List Queries: unfiltered categories/links list is denied, while owner query filtered by userId is allowed', () => {
+  assert.equal(
+    evaluateListUserCollection({ uid: 'user_1', email_verified: true }, 'user_1', null),
+    'PERMISSION_DENIED'
+  );
+  assert.equal(
+    evaluateListUserCollection({ uid: 'user_1', email_verified: true }, 'user_1', 'other_user'),
+    'PERMISSION_DENIED'
+  );
+  assert.equal(
+    evaluateListUserCollection({ uid: 'user_1', email_verified: false }, 'user_1', 'user_1'),
+    'PERMISSION_DENIED'
+  );
+  assert.equal(
+    evaluateListUserCollection({ uid: 'user_1', email_verified: true }, 'other_user', 'user_1'),
+    'PERMISSION_DENIED'
+  );
+  assert.equal(
+    evaluateListUserCollection({ uid: 'user_1', email_verified: true }, 'user_1', 'user_1'),
+    'ALLOWED'
+  );
+});
+
+

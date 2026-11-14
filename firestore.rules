@@ -149,7 +149,7 @@ service cloud.firestore {
         && data.description.size() <= 1024
         && data.isDefault is bool
         && (!('isPrivate' in data) || data.isPrivate is bool)
-        && (!('privateVaultMeta' in data) || (data.privateVaultMeta is string && data.privateVaultMeta.size() <= 1024))
+        && (!('privateVaultMeta' in data) || (data.privateVaultMeta is string && data.privateVaultMeta.size() <= 4096))
         && data.order is number
         && data.order >= 0
         && data.order <= 10000

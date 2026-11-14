@@ -304,4 +304,64 @@ test('getFaviconCandidates generates real site favicon fallback URLs and skips e
   assert.deepEqual(getFaviconCandidates('https://encrypted.linkhub.vault/ENC2:abc'), []);
 });
 
+test('generateUniqueCategorySlug handles duplicates, reserved slugs, and non-ASCII names', async () => {
+  const { generateUniqueCategorySlug } = await import('./vaultLogic.ts');
+  assert.equal(generateUniqueCategorySlug('Research', ['study', 'development']), 'research');
+  assert.equal(generateUniqueCategorySlug('Study', ['study', 'development']), 'study-2');
+  assert.equal(generateUniqueCategorySlug('Study', ['study', 'study-2']), 'study-3');
+  assert.equal(generateUniqueCategorySlug('All', ['study']), 'cat-all');
+  assert.equal(generateUniqueCategorySlug('Starred', ['study']), 'cat-starred');
+  assert.equal(generateUniqueCategorySlug('All', ['cat-all']), 'cat-all-2');
+  assert.equal(generateUniqueCategorySlug('C++', ['c']), 'c-2');
+  assert.equal(generateUniqueCategorySlug('✨', []), 'category');
+  assert.equal(generateUniqueCategorySlug('✨', ['category']), 'category-2');
+});
+
+test('mergeCategoriesWithPendingLocal preserves in-flight optimistic categories until reflected on server', async () => {
+  const { mergeCategoriesWithPendingLocal } = await import('./vaultLogic.ts');
+  const defaults = [
+    { id: 'study', name: 'Study', slug: 'study', color: '#3b82f6', icon: 'graduation-cap', description: '', isDefault: true, order: 0, createdAt: 1 },
+  ];
+  const optimisticNew = {
+    id: 'cat-pending-1',
+    userId: 'u1',
+    name: 'Research',
+    slug: 'research',
+    color: '#ff9000',
+    icon: 'compass',
+    description: '',
+    isDefault: false,
+    order: 1,
+    createdAt: 10000,
+  };
+
+  // Server snapshot arrives before optimistic category is committed
+  const { mergedCategories, missingDefaults } = mergeCategoriesWithPendingLocal({
+    prevCategories: [defaults[0], optimisticNew],
+    fetchedCategories: [defaults[0]],
+    defaultCategories: defaults,
+    uid: 'u1',
+    pendingIds: new Set(['cat-pending-1']),
+    deletedIds: new Set(),
+    nowMs: 12000,
+  });
+
+  assert.equal(missingDefaults.length, 0);
+  assert.equal(mergedCategories.some((c) => c.id === 'cat-pending-1'), true);
+  assert.equal(mergedCategories.length, 2);
+
+  // Deleted categories are excluded even if still in prev or server snapshot
+  const afterDelete = mergeCategoriesWithPendingLocal({
+    prevCategories: mergedCategories,
+    fetchedCategories: [defaults[0], optimisticNew],
+    defaultCategories: defaults,
+    uid: 'u1',
+    pendingIds: new Set(),
+    deletedIds: new Set(['cat-pending-1']),
+    nowMs: 13000,
+  });
+  assert.equal(afterDelete.mergedCategories.some((c) => c.id === 'cat-pending-1'), false);
+});
+
+
 

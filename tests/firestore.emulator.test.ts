@@ -13,7 +13,18 @@ import {
   assertSucceeds,
   type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
-import { doc, getDoc, setDoc, updateDoc, serverTimestamp, Timestamp } from 'firebase/firestore';
+import {
+  doc,
+  getDoc,
+  getDocs,
+  collection,
+  query,
+  where,
+  setDoc,
+  updateDoc,
+  serverTimestamp,
+  Timestamp,
+} from 'firebase/firestore';
 
 const emulatorHost = process.env.FIRESTORE_EMULATOR_HOST;
 
@@ -106,6 +117,24 @@ if (!emulatorHost) {
     );
 
     await assertSucceeds(
+      setDoc(doc(aliceDb, 'users/alice/categories/cat_research'), {
+        id: 'cat_research',
+        userId: 'alice',
+        name: 'Research',
+        slug: 'research',
+        color: '#ff9000',
+        icon: 'compass',
+        description: 'Papers and specs',
+        isDefault: false,
+        isPrivate: true,
+        privateVaultMeta: 'LHPRIV2:' + 'x'.repeat(1600),
+        order: 5,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      })
+    );
+
+    await assertSucceeds(
       setDoc(doc(aliceDb, 'users/alice/links/link_1'), {
         id: 'link_1',
         userId: 'alice',
@@ -123,8 +152,21 @@ if (!emulatorHost) {
       })
     );
 
+    await assertSucceeds(
+      getDocs(query(collection(aliceDb, 'users/alice/categories'), where('userId', '==', 'alice')))
+    );
+    await assertSucceeds(
+      getDocs(query(collection(aliceDb, 'users/alice/links'), where('userId', '==', 'alice')))
+    );
+    await assertFails(getDocs(collection(aliceDb, 'users/alice/categories')));
+    await assertFails(getDocs(collection(aliceDb, 'users/alice/links')));
+
     await assertFails(getDoc(doc(bobDb, 'users/alice')));
+    await assertFails(getDoc(doc(bobDb, 'users/alice/categories/cat_research')));
     await assertFails(getDoc(doc(bobDb, 'users/alice/links/link_1')));
+    await assertFails(
+      getDocs(query(collection(bobDb, 'users/alice/categories'), where('userId', '==', 'bob')))
+    );
     await assertFails(updateDoc(doc(bobDb, 'users/alice/links/link_1'), { title: 'Hacked' }));
   });
 

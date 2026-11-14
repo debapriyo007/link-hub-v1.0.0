@@ -64,7 +64,7 @@ export const ModalHeader: React.FC<{
   className?: string;
 }> = ({ children, onClose, className = '' }) => (
   <div
-    className={`px-4 sm:px-5 py-3.5 border-b border-white/[0.07] bg-white/[0.015] flex items-center justify-between gap-2 shrink-0 ${className}`}
+    className={`px-4 sm:px-5 py-3.5 flex items-center justify-between gap-2 shrink-0 ${className}`}
   >
     <div className="text-sm font-title font-bold text-white tracking-tight min-w-0 truncate">
       {children}

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Star,
   SquarePen,
@@ -48,6 +48,17 @@ export const CategoryPills: React.FC<CategoryPillsProps> = React.memo(
     const [draggedIdx, setDraggedIdx] = useState<number | null>(null);
     const [dragOverIdx, setDragOverIdx] = useState<number | null>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
+    const prevCategoryCountRef = useRef<number>(categories.length);
+
+    useEffect(() => {
+      if (categories.length > prevCategoryCountRef.current && scrollContainerRef.current) {
+        const el = scrollContainerRef.current;
+        requestAnimationFrame(() => {
+          el.scrollTo({ left: el.scrollWidth, behavior: 'smooth' });
+        });
+      }
+      prevCategoryCountRef.current = categories.length;
+    }, [categories.length]);
 
     const handleScroll = (direction: 'left' | 'right') => {
       playRetroClick();

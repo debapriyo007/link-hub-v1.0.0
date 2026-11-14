@@ -1,4 +1,4 @@
-import type { LinkItem, SortOption } from '../types.ts';
+import type { Category, LinkItem, SortOption } from '../types.ts';
 
 export function normalizeUrl(rawUrl: string): string {
   let url = (rawUrl || '').trim();
@@ -100,6 +100,122 @@ export function formatCategoryName(rawName: string): string {
     .toLowerCase()
     .replace(/(^|[\s\-&/])([a-z])/g, (_m, sep, ch) => `${sep}${ch.toUpperCase()}`)
     .replace(/\b(Ui|Ux|Ai|Api|Seo)\b/g, (m) => m.toUpperCase());
+}
+
+export const RESERVED_CATEGORY_SLUGS = new Set(['all', 'starred']);
+
+/**
+ * Generates a Firestore-safe (`^[a-zA-Z0-9_\-]+$`, max 60 chars) unique category slug
+ * that never collides with existing categories or reserved virtual tabs (`all`, `starred`).
+ */
+export function generateUniqueCategorySlug(
+  rawName: string,
+  existingSlugs: Iterable<string> = []
+): string {
+  const used = new Set<string>(RESERVED_CATEGORY_SLUGS);
+  for (const s of existingSlugs) {
+    if (typeof s === 'string' && s.trim()) {
+      used.add(s.trim().toLowerCase());
+    }
+  }
+
+  let base = (rawName || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 52)
+    .replace(/-+$/g, '');
+
+  if (!base) {
+    base = 'category';
+  }
+  if (RESERVED_CATEGORY_SLUGS.has(base)) {
+    base = `cat-${base}`;
+  }
+
+  if (!used.has(base)) {
+    return base;
+  }
+
+  let suffix = 2;
+  while (suffix < 10000) {
+    const suffixStr = `-${suffix}`;
+    const trimmedBase = base.slice(0, Math.max(1, 60 - suffixStr.length)).replace(/-+$/g, '');
+    const candidate = `${trimmedBase || 'cat'}${suffixStr}`;
+    if (!used.has(candidate)) {
+      return candidate;
+    }
+    suffix += 1;
+  }
+
+  return `cat-${Date.now()}`.slice(0, 60);
+}
+
+/**
+ * Merges Firestore category snapshots with in-flight optimistic local categories
+ * and missing default categories without wiping newly created categories.
+ */
+export function mergeCategoriesWithPendingLocal(params: {
+  prevCategories: Category[];
+  fetchedCategories: Category[];
+  defaultCategories: Category[];
+  uid: string;
+  pendingIds?: Set<string>;
+  deletedIds?: Set<string>;
+  nowMs?: number;
+}): { mergedCategories: Category[]; missingDefaults: Category[] } {
+  const {
+    prevCategories,
+    fetchedCategories,
+    defaultCategories,
+    uid,
+    pendingIds,
+    deletedIds,
+    nowMs = Date.now(),
+  } = params;
+
+  const visibleFetched = deletedIds
+    ? fetchedCategories.filter((c) => !deletedIds.has(c.id))
+    : fetchedCategories;
+
+  const fetchedIds = new Set(visibleFetched.map((c) => c.id));
+  const pendingLocal = prevCategories.filter((c) => {
+    if (deletedIds?.has(c.id)) return false;
+    if (fetchedIds.has(c.id)) return false;
+    if (pendingIds?.has(c.id)) return true;
+    return !c.isDefault && typeof c.createdAt === 'number' && nowMs - c.createdAt < 15000;
+  });
+
+  const combinedExisting = [...visibleFetched, ...pendingLocal];
+  const existingBySlug = new Set(
+    combinedExisting.map((c) => (c.slug || '').toLowerCase().trim()).filter(Boolean)
+  );
+  const existingById = new Set(combinedExisting.map((c) => c.id));
+
+  const missingDefaults = defaultCategories.filter((def) => {
+    if (deletedIds?.has(def.id)) return false;
+    const normSlug = (def.slug || '').toLowerCase().trim();
+    return !existingBySlug.has(normSlug) && !existingById.has(def.id);
+  });
+
+  const mappedMissingDefaults: Category[] = missingDefaults.map((def, i) => ({
+    ...def,
+    userId: uid,
+    order: typeof def.order === 'number' ? def.order : combinedExisting.length + i,
+  }));
+
+  const dedupedById = new Map<string, Category>();
+  for (const cat of [...combinedExisting, ...mappedMissingDefaults]) {
+    if (!dedupedById.has(cat.id)) {
+      dedupedById.set(cat.id, cat);
+    }
+  }
+
+  const mergedCategories = Array.from(dedupedById.values()).sort(
+    (a, b) => (a.order ?? 0) - (b.order ?? 0)
+  );
+
+  return { mergedCategories, missingDefaults };
 }
 
 export function filterAndSortLinks(

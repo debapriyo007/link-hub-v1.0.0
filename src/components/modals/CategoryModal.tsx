@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Trash2, Eye, EyeOff, ShieldCheck } from 'lucide-react';
 import { Category } from '../../types.ts';
-import { formatCategoryName } from '../../utils/vaultLogic.ts';
+import { formatCategoryName, generateUniqueCategorySlug } from '../../utils/vaultLogic.ts';
 import { playRetroClick, playRetroBeep } from '../../utils/sound.ts';
 import { Modal, ModalHeader, ModalBody, ModalFooter } from '../ui/Modal.tsx';
 import { Button } from '../ui/Button.tsx';
@@ -11,9 +11,10 @@ import { CategoryIcon } from '../CategoryIcon.tsx';
 interface CategoryModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (categoryData: Partial<Category>) => void;
+  onSave: (categoryData: Partial<Category>) => Promise<boolean | void> | boolean | void;
   onDelete?: (category: Category) => void;
   category?: Category | null;
+  existingCategories?: Category[];
 }
 
 const PRESET_COLORS = [
@@ -66,6 +67,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
   onSave,
   onDelete,
   category,
+  existingCategories = [],
 }) => {
   const [name, setName] = useState('');
   const [color, setColor] = useState('#ff9000');
@@ -76,6 +78,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
   const [showPin, setShowPin] = useState(false);
   const [error, setError] = useState('');
   const [pinError, setPinError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   useEffect(() => {
     if (category) {
@@ -96,12 +99,14 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
     setShowPin(false);
     setError('');
     setPinError('');
+    setIsSubmitting(false);
   }, [category, isOpen]);
 
   if (!isOpen) return null;
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     const rawTrimmed = name.trim();
     if (!rawTrimmed) {
       setError('Please provide a category name.');
@@ -130,25 +135,37 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
 
     const slug = category
       ? category.slug
-      : cleanName
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, '-')
-          .replace(/-+/g, '-')
-          .replace(/^-+|-+$/g, '') || `cat-${Date.now()}`;
+      : generateUniqueCategorySlug(
+          cleanName,
+          existingCategories.map((c) => c.slug)
+        );
 
     playRetroClick();
-    onSave({
-      name: cleanName,
-      slug,
-      color,
-      icon,
-      description: description.trim(),
-      isPrivate,
-      privatePin: isPrivate && cleanPin.length === 6 ? cleanPin : undefined,
-      privateVaultMeta: isPrivate ? category?.privateVaultMeta : '',
-      privatePinHash: isPrivate ? category?.privatePinHash : '',
-    });
-    onClose();
+    setIsSubmitting(true);
+    setError('');
+    try {
+      const saved = await onSave({
+        name: cleanName,
+        slug,
+        color,
+        icon,
+        description: description.trim().slice(0, 240),
+        isPrivate,
+        privatePin: isPrivate && cleanPin.length === 6 ? cleanPin : undefined,
+        privateVaultMeta: isPrivate ? category?.privateVaultMeta : '',
+        privatePinHash: isPrivate ? category?.privatePinHash : '',
+      });
+      if (saved !== false) {
+        onClose();
+      } else {
+        setError('Could not save category. Please check your connection and try again.');
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save category.');
+      playRetroBeep();
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -165,6 +182,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
             label="Category Name"
             placeholder="e.g. Gaming, Productivity, Secret Docs"
             value={name}
+            maxLength={60}
             onChange={(e) => {
               setName(e.target.value);
               setError('');
@@ -215,7 +233,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
             {isPrivate && (
               <div className="pt-2.5 border-t border-white/[0.07] space-y-1.5 animate-in fade-in duration-150">
                 <label className="block text-[11px] font-semibold text-zinc-300">
-                  {category?.isPrivate && category?.privatePinHash
+                  {category?.isPrivate && (category?.privateVaultMeta || category?.privatePinHash)
                     ? 'Update 6-Digit Private Security Code (leave blank to keep current)'
                     : 'Set 6-Digit Private Security Code'}
                 </label>
@@ -315,6 +333,7 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
             </label>
             <textarea
               rows={2}
+              maxLength={240}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Short description..."
@@ -342,11 +361,30 @@ export const CategoryModal: React.FC<CategoryModalProps> = ({
           )}
 
           <div className="flex items-center gap-2">
-            <Button variant="flat" color="default" size="sm" onClick={onClose}>
+            <Button
+              type="button"
+              variant="flat"
+              color="default"
+              size="sm"
+              disabled={isSubmitting}
+              onClick={onClose}
+            >
               Cancel
             </Button>
-            <Button type="submit" color="primary" variant="solid" size="sm">
-              {category ? 'Save Changes' : 'Create Category'}
+            <Button
+              type="submit"
+              color="primary"
+              variant="solid"
+              size="sm"
+              isLoading={isSubmitting}
+            >
+              {category
+                ? isSubmitting
+                  ? 'Saving...'
+                  : 'Save Changes'
+                : isSubmitting
+                  ? 'Creating...'
+                  : 'Create Category'}
             </Button>
           </div>
         </ModalFooter>

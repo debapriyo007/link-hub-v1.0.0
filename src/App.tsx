@@ -12,14 +12,17 @@ import {
   FolderOpen,
   QrCode,
   CircleUserRound,
-  LockKeyhole,
-  ShieldCheck,
 } from 'lucide-react';
 import { BsBookmarks } from 'react-icons/bs';
+import { PiLockKeyOpenFill } from 'react-icons/pi';
 import { TbBookmarksOff } from 'react-icons/tb';
 import { LinkItem, Category, SortOption, UserProfile } from './types.ts';
 import { INITIAL_LINKS, INITIAL_CATEGORIES } from './data/initialData.ts';
-import { filterAndSortLinks } from './utils/vaultLogic.ts';
+import {
+  filterAndSortLinks,
+  generateUniqueCategorySlug,
+  mergeCategoriesWithPendingLocal,
+} from './utils/vaultLogic.ts';
 import {
   encodeCategoryForStorageAsync,
   decodeCategoryFromStorage,
@@ -65,6 +68,8 @@ import {
   updateDoc,
   deleteDoc,
   collection,
+  query,
+  where,
   onSnapshot,
   serverTimestamp,
   writeBatch,
@@ -84,6 +89,8 @@ import {
   sanitizeCategoryCreate,
   sanitizeLinkCreate,
   toMillis,
+  OperationType,
+  logFirestoreError,
   type FirebaseUser,
 } from './firebase.ts';
 
@@ -149,6 +156,8 @@ export default function App() {
   const [isLocked, setIsLocked] = useState<boolean>(false);
   const [privateUnlockVersion, setPrivateUnlockVersion] = useState<number>(0);
   const seededDefaultCatsUidRef = useRef<string | null>(null);
+  const pendingCategoryIdsRef = useRef<Set<string>>(new Set());
+  const deletedCategoryIdsRef = useRef<Set<string>>(new Set());
 
   // UI Filter & Sort State
   const [activeCategory, setActiveCategory] = useState<string>('all');
@@ -441,6 +450,59 @@ export default function App() {
     } catch {}
   }, []);
 
+  const ensureUserDocumentExists = useCallback(
+    async (uid: string): Promise<boolean> => {
+      if (isE2ESession) return true;
+      const fbUser = auth.currentUser;
+      if (!fbUser) return false;
+      if (!fbUser.emailVerified) {
+        try {
+          await reload(fbUser);
+        } catch {}
+      }
+      try {
+        const tokenRes = await fbUser.getIdTokenResult(false);
+        if (!tokenRes?.claims?.email_verified) {
+          await fbUser.getIdToken(true);
+        }
+      } catch {
+        try {
+          await fbUser.getIdToken(true);
+        } catch {}
+      }
+
+      const userDocRef = doc(db, 'users', uid);
+      try {
+        const snap = await getDoc(userDocRef);
+        if (snap.exists()) {
+          return true;
+        }
+        const initialProfilePayload = sanitizeUserProfileCreate({
+          uid,
+          email: fbUser.email || userProfile?.email || 'user@linkhub.cloud',
+          displayName: fbUser.displayName || userProfile?.displayName || 'LINKHUB User',
+          photoURL: fbUser.photoURL || userProfile?.photoURL || '',
+          pin: '',
+          pinVerifier: userProfile?.pinVerifier || '',
+          vaultVersion: userProfile?.vaultVersion || 2,
+        });
+        await setDoc(userDocRef, initialProfilePayload);
+        return true;
+      } catch (error) {
+        logFirestoreError(error, OperationType.WRITE, `users/${uid}`);
+        return false;
+      }
+    },
+    [
+      isE2ESession,
+      userProfile?.email,
+      userProfile?.displayName,
+      userProfile?.photoURL,
+      userProfile?.pinVerifier,
+      userProfile?.vaultVersion,
+    ]
+  );
+
   // Seed starter categories and bookmarks for a brand-new user in Firestore
   const seedStarterVaultInFirestore = useCallback(async (uid: string) => {
     const batch = writeBatch(db);
@@ -457,7 +519,7 @@ export default function App() {
     try {
       await batch.commit();
     } catch (error) {
-      console.warn('Could not seed starter vault in Firestore:', error);
+      logFirestoreError(error, OperationType.WRITE, `users/${uid}/starter-vault`);
     }
   }, []);
 
@@ -467,6 +529,18 @@ export default function App() {
       setIsE2ESession(false);
       const uid = sanitizeId(fbUser.uid, 128);
       const userDocRef = doc(db, 'users', uid);
+
+      // Ensure the JWT attached to Firestore reflects email_verified: true before firing listeners
+      try {
+        const tokenRes = await fbUser.getIdTokenResult(false);
+        if (!tokenRes?.claims?.email_verified) {
+          await fbUser.getIdToken(true);
+        }
+      } catch {
+        try {
+          await fbUser.getIdToken(true);
+        } catch {}
+      }
 
       // 1. Immediately hydrate from local cache so the UI renders with zero network wait
       const cachedLinks = loadCachedLinks(uid);
@@ -502,6 +576,7 @@ export default function App() {
       try {
         const snap = await getDoc(userDocRef);
         if (!snap.exists()) {
+          seededDefaultCatsUidRef.current = uid;
           const initialProfilePayload = sanitizeUserProfileCreate({
             uid,
             email: fbUser.email,
@@ -516,7 +591,6 @@ export default function App() {
           }
           await setDoc(userDocRef, initialProfilePayload);
           await seedStarterVaultInFirestore(uid);
-          seededDefaultCatsUidRef.current = uid;
         } else {
           const data = snap.data();
           const storedPin = typeof data.pin === 'string' ? data.pin : '';
@@ -650,6 +724,15 @@ export default function App() {
     const categoriesPath = `users/${uid}/categories`;
     const linksPath = `users/${uid}/links`;
 
+    const categoriesQuery = query(
+      collection(db, categoriesPath),
+      where('userId', '==', uid)
+    );
+    const linksQuery = query(
+      collection(db, linksPath),
+      where('userId', '==', uid)
+    );
+
     const unsubProfile = onSnapshot(
       doc(db, 'users', uid),
       (docSnap) => {
@@ -673,12 +756,12 @@ export default function App() {
         }
       },
       (error) => {
-        console.warn('Profile listener warning:', error);
+        logFirestoreError(error, OperationType.GET, `users/${uid}`);
       }
     );
 
     const unsubCategories = onSnapshot(
-      collection(db, categoriesPath),
+      categoriesQuery,
       (querySnap) => {
         const fetchedCategories: Category[] = querySnap.docs.map((d) => {
           const data = d.data();
@@ -699,43 +782,57 @@ export default function App() {
           return decodeCategoryFromStorage(rawCat, uid);
         });
 
-        // Merge with INITIAL_CATEGORIES so given categories are always available
-        const fetchedBySlug = new Map(fetchedCategories.map((c) => [c.slug, c]));
-        const missingDefaults = INITIAL_CATEGORIES.filter((def) => !fetchedBySlug.has(def.slug));
+        const serverIds = new Set(fetchedCategories.map((c) => c.id));
+        serverIds.forEach((id) => pendingCategoryIdsRef.current.delete(id));
+        Array.from(deletedCategoryIdsRef.current).forEach((id) => {
+          if (!serverIds.has(id)) {
+            deletedCategoryIdsRef.current.delete(id);
+          }
+        });
 
-        const mergedCategories: Category[] = [
-          ...fetchedCategories,
-          ...missingDefaults.map((def, i) => ({
-            ...def,
-            userId: uid,
-            order: typeof def.order === 'number' ? def.order : fetchedCategories.length + i,
-          })),
-        ];
-        mergedCategories.sort((a, b) => a.order - b.order);
-        setCategories(mergedCategories);
-        saveCachedCategories(uid, mergedCategories);
+        let defaultsToSeed: Category[] = [];
+        setCategories((prev) => {
+          const { mergedCategories, missingDefaults } = mergeCategoriesWithPendingLocal({
+            prevCategories: prev,
+            fetchedCategories,
+            defaultCategories: INITIAL_CATEGORIES,
+            uid,
+            pendingIds: pendingCategoryIdsRef.current,
+            deletedIds: deletedCategoryIdsRef.current,
+          });
+          defaultsToSeed = missingDefaults;
+          saveCachedCategories(uid, mergedCategories);
+          return mergedCategories;
+        });
 
-        // Seed any missing given categories to Firestore once per session
-        if (missingDefaults.length > 0 && seededDefaultCatsUidRef.current !== uid) {
-          seededDefaultCatsUidRef.current = uid;
-          const batch = writeBatch(db);
-          missingDefaults.forEach((def, idx) => {
-            const catPayload = sanitizeCategoryCreate(def, uid, def.order ?? idx);
-            const catRef = doc(db, categoriesPath, catPayload.id);
-            batch.set(catRef, catPayload);
-          });
-          batch.commit().catch((err) => {
-            console.warn('Could not seed missing default categories:', err);
-          });
+        // Seed any missing given categories to Firestore once per session (only after parent user doc exists)
+        if (defaultsToSeed.length > 0 && seededDefaultCatsUidRef.current !== uid) {
+          void (async () => {
+            const parentReady = await ensureUserDocumentExists(uid);
+            if (!parentReady) return;
+            seededDefaultCatsUidRef.current = uid;
+            const batch = writeBatch(db);
+            defaultsToSeed.forEach((def, idx) => {
+              const catPayload = sanitizeCategoryCreate(def, uid, def.order ?? idx);
+              const catRef = doc(db, categoriesPath, catPayload.id);
+              batch.set(catRef, catPayload);
+            });
+            try {
+              await batch.commit();
+            } catch (err) {
+              seededDefaultCatsUidRef.current = null;
+              logFirestoreError(err, OperationType.WRITE, categoriesPath);
+            }
+          })();
         }
       },
       (error) => {
-        console.warn('Categories listener warning:', error);
+        logFirestoreError(error, OperationType.LIST, categoriesPath);
       }
     );
 
     const unsubLinks = onSnapshot(
-      collection(db, linksPath),
+      linksQuery,
       (querySnap) => {
         const fetchedLinks: LinkItem[] = querySnap.docs.map((d) => {
           const data = d.data();
@@ -783,7 +880,7 @@ export default function App() {
         });
       },
       (error) => {
-        console.warn('Links listener warning:', error);
+        logFirestoreError(error, OperationType.LIST, linksPath);
       }
     );
 
@@ -800,6 +897,7 @@ export default function App() {
     saveCachedLinks,
     saveCachedCategories,
     loadProfileExtras,
+    ensureUserDocumentExists,
   ]);
 
   // Set of private category slugs (both exact and lowercase normalized)
@@ -1133,9 +1231,10 @@ export default function App() {
 
       if (!isE2ESession) {
         try {
+          await ensureUserDocumentExists(uid);
           await setDoc(doc(db, `users/${uid}/links`, payload.id), payload);
         } catch (error) {
-          console.warn('Could not sync new link to Firestore:', error);
+          logFirestoreError(error, OperationType.CREATE, `users/${uid}/links/${payload.id}`);
         }
       }
     }
@@ -1228,8 +1327,8 @@ export default function App() {
   };
 
   // Category CRUD operations in Firestore (with AES-256-GCM Private Category support)
-  const handleSaveCategory = async (catData: Partial<Category>) => {
-    if (!userProfile) return;
+  const handleSaveCategory = async (catData: Partial<Category>): Promise<boolean> => {
+    if (!userProfile) return false;
     const uid = userProfile.uid;
 
     if (editingCategory) {
@@ -1243,7 +1342,7 @@ export default function App() {
       } catch (err) {
         playRetroBeep();
         showToast(err instanceof Error ? err.message : 'Could not secure private category.', 'error');
-        return;
+        return false;
       }
 
       const sanitized = sanitizeCategoryCreate(
@@ -1272,6 +1371,7 @@ export default function App() {
         name: encoded.name,
       };
 
+      const prevSnapshot = categories;
       setCategories((prev) => {
         const next = prev.map((c) => (c.id === targetId ? displayCat : c));
         saveCachedCategories(uid, next);
@@ -1320,28 +1420,40 @@ export default function App() {
         }
       }
 
-      showToast(displayCat.isPrivate ? 'Private category updated!' : 'Category updated!');
-      setEditingCategory(null);
-
       if (!isE2ESession) {
-        try {
-          await updateDoc(doc(db, `users/${uid}/categories`, targetId), {
-            name: sanitized.name,
-            slug: sanitized.slug,
-            color: sanitized.color,
-            icon: sanitized.icon,
-            description: sanitized.description,
-            isPrivate: sanitized.isPrivate,
-            privateVaultMeta: sanitized.privateVaultMeta,
-            order: sanitized.order,
-            updatedAt: serverTimestamp(),
-          });
-        } catch (error) {
-          console.warn('Firestore category update fallback to setDoc:', error);
+        const catPath = `users/${uid}/categories/${targetId}`;
+        const writeCategoryUpdate = async () => {
+          await ensureUserDocumentExists(uid);
           try {
+            await updateDoc(doc(db, `users/${uid}/categories`, targetId), {
+              name: sanitized.name,
+              slug: sanitized.slug,
+              color: sanitized.color,
+              icon: sanitized.icon,
+              description: sanitized.description,
+              isPrivate: sanitized.isPrivate,
+              privateVaultMeta: sanitized.privateVaultMeta,
+              order: sanitized.order,
+              updatedAt: serverTimestamp(),
+            });
+          } catch {
             await setDoc(doc(db, `users/${uid}/categories`, targetId), sanitized);
-          } catch (innerErr) {
-            console.warn('Could not sync updated category to Firestore:', innerErr);
+          }
+        };
+
+        try {
+          await writeCategoryUpdate();
+        } catch {
+          try {
+            await auth.currentUser?.getIdToken(true);
+            await writeCategoryUpdate();
+          } catch (finalErr) {
+            setCategories(prevSnapshot);
+            saveCachedCategories(uid, prevSnapshot);
+            logFirestoreError(finalErr, OperationType.UPDATE, catPath);
+            playRetroBeep();
+            showToast('Could not update category in cloud vault. Please try again.', 'error');
+            return false;
           }
         }
 
@@ -1364,17 +1476,29 @@ export default function App() {
           } catch {
             try {
               await setDoc(doc(db, `users/${uid}/links`, encLink.id), sanitizedLink);
-            } catch {}
+            } catch (linkErr) {
+              logFirestoreError(linkErr, OperationType.UPDATE, `users/${uid}/links/${encLink.id}`);
+            }
           }
         }
       }
+
+      showToast(displayCat.isPrivate ? 'Private category updated!' : 'Category updated!');
+      setEditingCategory(null);
+      return true;
     } else {
-      const newCatId = `cat-${Date.now()}`;
+      const newCatId = `cat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+      const uniqueSlug = generateUniqueCategorySlug(
+        catData.name || 'Category',
+        categories.map((c) => c.slug)
+      );
+
       let encoded: Awaited<ReturnType<typeof encodeCategoryForStorageAsync>>;
       try {
         encoded = await encodeCategoryForStorageAsync(
           {
             ...catData,
+            slug: uniqueSlug,
             id: newCatId,
           },
           uid
@@ -1382,7 +1506,7 @@ export default function App() {
       } catch (err) {
         playRetroBeep();
         showToast(err instanceof Error ? err.message : 'Could not secure private category.', 'error');
-        return;
+        return false;
       }
 
       const payload = sanitizeCategoryCreate(
@@ -1411,11 +1535,46 @@ export default function App() {
         name: encoded.name,
       };
 
+      pendingCategoryIdsRef.current.add(payload.id);
       setCategories((prev) => {
         const next = [...prev, displayCat];
         saveCachedCategories(uid, next);
         return next;
       });
+
+      if (!isE2ESession) {
+        const catPath = `users/${uid}/categories/${payload.id}`;
+        const createCategoryDoc = async () => {
+          const parentReady = await ensureUserDocumentExists(uid);
+          if (!parentReady) {
+            throw new Error('Parent user vault profile could not be initialized.');
+          }
+          await setDoc(doc(db, `users/${uid}/categories`, payload.id), payload);
+        };
+
+        try {
+          await createCategoryDoc();
+        } catch {
+          try {
+            await auth.currentUser?.getIdToken(true);
+            await createCategoryDoc();
+          } catch (finalErr) {
+            pendingCategoryIdsRef.current.delete(payload.id);
+            setCategories((prev) => {
+              const rolledBack = prev.filter((c) => c.id !== payload.id);
+              saveCachedCategories(uid, rolledBack);
+              return rolledBack;
+            });
+            logFirestoreError(finalErr, OperationType.CREATE, catPath);
+            playRetroBeep();
+            showToast(
+              'Could not save new category to cloud vault. Please verify your session and try again.',
+              'error'
+            );
+            return false;
+          }
+        }
+      }
 
       if (displayCat.isPrivate) {
         setUnlockedPrivateSlugs((prev) => new Set(prev).add(displayCat.slug));
@@ -1425,14 +1584,7 @@ export default function App() {
       } else {
         showToast('Category created!');
       }
-
-      if (!isE2ESession) {
-        try {
-          await setDoc(doc(db, `users/${uid}/categories`, payload.id), payload);
-        } catch (error) {
-          console.warn('Could not create category in Firestore:', error);
-        }
-      }
+      return true;
     }
   };
 
@@ -1447,7 +1599,14 @@ export default function App() {
     const uid = userProfile.uid;
     const fallbackSlug = categories.find((c) => c.id !== cat.id)?.slug || 'general';
 
-    setCategories((prev) => prev.filter((c) => c.id !== cat.id));
+    pendingCategoryIdsRef.current.delete(cat.id);
+    deletedCategoryIdsRef.current.add(cat.id);
+
+    setCategories((prev) => {
+      const next = prev.filter((c) => c.id !== cat.id);
+      saveCachedCategories(uid, next);
+      return next;
+    });
     setLinks((prev) => {
       const next = prev.map((l) =>
         l.categorySlug === cat.slug ? { ...l, categorySlug: fallbackSlug } : l
@@ -1475,7 +1634,7 @@ export default function App() {
       try {
         await batch.commit();
       } catch (error) {
-        console.warn('Could not delete category from Firestore:', error);
+        logFirestoreError(error, OperationType.DELETE, `users/${uid}/categories/${cat.id}`);
       }
     }
   };
@@ -1492,15 +1651,17 @@ export default function App() {
       return;
     }
     playRetroClick();
+    const uid = userProfile.uid;
 
     const next = [...categories];
     const [moved] = next.splice(fromIndex, 1);
     next.splice(toIndex, 0, moved);
     const reordered = next.map((c, idx) => ({ ...c, order: idx }));
     setCategories(reordered);
+    saveCachedCategories(uid, reordered);
 
     if (!isE2ESession) {
-      const uid = userProfile.uid;
+      await ensureUserDocumentExists(uid);
       const batch = writeBatch(db);
       reordered.forEach((cat, idx) => {
         batch.update(doc(db, `users/${uid}/categories`, cat.id), {
@@ -1511,7 +1672,7 @@ export default function App() {
       try {
         await batch.commit();
       } catch (error) {
-        console.warn('Could not reorder categories in Firestore:', error);
+        logFirestoreError(error, OperationType.UPDATE, `users/${uid}/categories`);
       }
     }
   };
@@ -1561,84 +1722,103 @@ export default function App() {
       const uid = userProfile.uid;
       let destinationSlug = targetCategorySlug;
 
-    let createdCategoryPayload: ReturnType<typeof sanitizeCategoryCreate> | null = null;
-    if (newCategoryMeta && !categories.some((c) => c.slug === newCategoryMeta.slug)) {
-      createdCategoryPayload = sanitizeCategoryCreate(
-        {
-          id: `cat-${Date.now()}`,
-          name: newCategoryMeta.name,
-          slug: newCategoryMeta.slug,
-          icon: newCategoryMeta.icon || 'Sparkles',
-          color: newCategoryMeta.color || '#ff9000',
-          description: newCategoryMeta.description || 'Shared category collection',
-          isDefault: false,
-        },
-        uid,
-        categories.length
-      );
-      destinationSlug = createdCategoryPayload.slug;
-      setCategories((prev) => [
-        ...prev,
-        {
-          ...createdCategoryPayload!,
-          createdAt: Date.now(),
-        },
-      ]);
-    }
-
-    const now = Date.now();
-    const newItems: LinkItem[] = sharedLinks.map((item, idx) => {
-      const payload = sanitizeLinkCreate(
-        {
-          id: `link-shared-${now}-${idx}`,
-          title: item.title,
-          url: item.url,
-          description: item.description || '',
-          categorySlug: destinationSlug,
-          tags: item.tags && item.tags.length > 0 ? item.tags : ['shared'],
-          isFavorite: false,
-          clickCount: 0,
-        },
-        uid
-      );
-      return {
-        ...payload,
-        createdAt: now + idx,
-        updatedAt: now + idx,
-      };
-    });
-
-    setLinks((prev) => {
-      const next = [...newItems, ...prev];
-      saveCachedLinks(uid, next);
-      return next;
-    });
-    setActiveCategory(destinationSlug);
-
-    if (!isE2ESession) {
-      const batch = writeBatch(db);
-      if (createdCategoryPayload) {
-        batch.set(
-          doc(db, `users/${uid}/categories`, createdCategoryPayload.id),
-          createdCategoryPayload
+      let createdCategoryPayload: ReturnType<typeof sanitizeCategoryCreate> | null = null;
+      if (newCategoryMeta && !categories.some((c) => c.slug === newCategoryMeta.slug)) {
+        const uniqueSlug = generateUniqueCategorySlug(
+          newCategoryMeta.name || newCategoryMeta.slug,
+          categories.map((c) => c.slug)
         );
+        createdCategoryPayload = sanitizeCategoryCreate(
+          {
+            id: `cat-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: newCategoryMeta.name,
+            slug: uniqueSlug,
+            icon: newCategoryMeta.icon || 'Sparkles',
+            color: newCategoryMeta.color || '#ff9000',
+            description: newCategoryMeta.description || 'Shared category collection',
+            isDefault: false,
+          },
+          uid,
+          categories.length
+        );
+        destinationSlug = createdCategoryPayload.slug;
+        pendingCategoryIdsRef.current.add(createdCategoryPayload.id);
+        setCategories((prev) => {
+          const next = [
+            ...prev,
+            {
+              ...createdCategoryPayload!,
+              createdAt: Date.now(),
+            },
+          ];
+          saveCachedCategories(uid, next);
+          return next;
+        });
       }
-      newItems.forEach((item) => {
-        const payload = sanitizeLinkCreate(item, uid);
-        batch.set(doc(db, `users/${uid}/links`, payload.id), payload);
-      });
-      try {
-        await batch.commit();
-      } catch (error) {
-        console.warn('Could not sync shared category links to Firestore:', error);
-      }
-    }
 
-    setPendingSharedBundle(null);
-    setPendingSharedSummary(null);
-    showToast(`Saved ${newItems.length} shared link${newItems.length === 1 ? '' : 's'}!`);
-  },
-  [userProfile, categories, pendingSharedBundle, isE2ESession, saveCachedLinks, showToast]
+      const now = Date.now();
+      const newItems: LinkItem[] = sharedLinks.map((item, idx) => {
+        const payload = sanitizeLinkCreate(
+          {
+            id: `link-shared-${now}-${idx}`,
+            title: item.title,
+            url: item.url,
+            description: item.description || '',
+            categorySlug: destinationSlug,
+            tags: item.tags && item.tags.length > 0 ? item.tags : ['shared'],
+            isFavorite: false,
+            clickCount: 0,
+          },
+          uid
+        );
+        return {
+          ...payload,
+          createdAt: now + idx,
+          updatedAt: now + idx,
+        };
+      });
+
+      setLinks((prev) => {
+        const next = [...newItems, ...prev];
+        saveCachedLinks(uid, next);
+        return next;
+      });
+      setActiveCategory(destinationSlug);
+
+      if (!isE2ESession) {
+        await ensureUserDocumentExists(uid);
+        const batch = writeBatch(db);
+        if (createdCategoryPayload) {
+          batch.set(
+            doc(db, `users/${uid}/categories`, createdCategoryPayload.id),
+            createdCategoryPayload
+          );
+        }
+        newItems.forEach((item) => {
+          const payload = sanitizeLinkCreate(item, uid);
+          batch.set(doc(db, `users/${uid}/links`, payload.id), payload);
+        });
+        try {
+          await batch.commit();
+        } catch (error) {
+          logFirestoreError(error, OperationType.WRITE, `users/${uid}/shared-import`);
+        }
+      }
+
+      setPendingSharedBundle(null);
+      setPendingSharedSummary(null);
+      showToast(`Saved ${newItems.length} shared link${newItems.length === 1 ? '' : 's'}!`);
+    },
+    [
+      userProfile,
+      categories,
+      pendingSharedBundle,
+      isE2ESession,
+      saveCachedLinks,
+      saveCachedCategories,
+      ensureUserDocumentExists,
+      showToast,
+    ]
   );
 
   // Automatically import any pre-login selected shared links once the user logs in
@@ -1897,9 +2077,19 @@ export default function App() {
     const existingSlugs = new Set(categories.map((c) => c.slug));
     const newCats = (importedCategories || [])
       .filter((c) => !existingSlugs.has(c.slug))
-      .slice(0, 20);
+      .slice(0, 20)
+      .map((c, idx) => ({
+        ...c,
+        id: c.id || `cat-imp-${Date.now()}-${idx}`,
+        createdAt: typeof c.createdAt === 'number' ? c.createdAt : Date.now(),
+      }));
 
-    setCategories((prev) => [...prev, ...newCats]);
+    newCats.forEach((c) => pendingCategoryIdsRef.current.add(c.id));
+    setCategories((prev) => {
+      const next = [...prev, ...newCats];
+      saveCachedCategories(uid, next);
+      return next;
+    });
     setLinks((prev) => {
       const next = [...newItems, ...prev];
       saveCachedLinks(uid, next);
@@ -1907,6 +2097,7 @@ export default function App() {
     });
 
     if (!isE2ESession) {
+      await ensureUserDocumentExists(uid);
       const batch = writeBatch(db);
       newCats.forEach((cat, idx) => {
         const payload = sanitizeCategoryCreate(cat, uid, categories.length + idx);
@@ -1919,7 +2110,7 @@ export default function App() {
       try {
         await batch.commit();
       } catch (error) {
-        console.warn('Could not sync imported bookmarks to Firestore:', error);
+        logFirestoreError(error, OperationType.WRITE, `users/${uid}/import`);
       }
     }
 
@@ -2225,42 +2416,6 @@ export default function App() {
             unlockedPrivateSlugs={unlockedPrivateSlugs}
           />
 
-          {/* Unlocked Private Encrypted Category Banner */}
-          {activeCategory !== 'all' &&
-            activeCategory !== 'starred' &&
-            privateCategorySlugs.has(activeCategory) &&
-            unlockedPrivateSlugs.has(activeCategory) && (
-              <div className="rounded-xl bg-[#ff9000]/10 border border-[#ff9000]/35 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2.5">
-                <div className="flex items-center gap-2.5 min-w-0">
-                  <div className="w-7 h-7 rounded-lg bg-[#ff9000]/20 text-[#ff9000] flex items-center justify-center shrink-0">
-                    <ShieldCheck size={15} strokeWidth={2.2} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="text-xs font-bold text-white flex items-center gap-1.5">
-                      <span className="truncate">
-                        {categories.find((c) => c.slug === activeCategory)?.name || 'Private Vault'}
-                      </span>
-                      <span className="px-1.5 py-0.5 rounded bg-[#ff9000] text-black text-[9px] font-extrabold uppercase tracking-wider">
-                        Encrypted
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-zinc-300 truncate">
-                      Bookmarks in this category are encrypted in the database and hidden from All Links.
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => handleLockPrivateCategory(activeCategory)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.06] hover:bg-[#ff9000] text-white hover:text-black border border-white/[0.12] hover:border-[#ff9000] text-xs font-bold transition-colors cursor-pointer shrink-0"
-                >
-                  <LockKeyhole size={12} strokeWidth={2.3} />
-                  <span>Lock Category</span>
-                </button>
-              </div>
-            )}
-
           {/* Responsive Controls Bar */}
           <div className="flex flex-wrap items-center justify-between gap-2 sm:gap-3 text-[11px] sm:text-xs">
             {/* Left: Counts and Active Filters */}
@@ -2330,6 +2485,21 @@ export default function App() {
 
             {/* Right: Compact Premium Icon Filter & Sort Controls */}
             <div className="flex items-center justify-end gap-1.5 sm:gap-2 shrink-0">
+              {activeCategory !== 'all' &&
+                activeCategory !== 'starred' &&
+                privateCategorySlugs.has(activeCategory) &&
+                unlockedPrivateSlugs.has(activeCategory) && (
+                  <button
+                    type="button"
+                    onClick={() => handleLockPrivateCategory(activeCategory)}
+                    title="Lock Private Category"
+                    aria-label="Lock Private Category"
+                    className="w-8 h-8 rounded-xl flex items-center justify-center border glass-input text-zinc-300 hover:text-[#ff9000] hover:bg-white/[0.08] transition-all cursor-pointer shrink-0"
+                  >
+                    <PiLockKeyOpenFill size={15} />
+                  </button>
+                )}
+
               {/* Favorites Filter Icon Button */}
               <button
                 type="button"
@@ -2733,6 +2903,7 @@ export default function App() {
           onSave={handleSaveCategory}
           onDelete={handleDeleteCategory}
           category={editingCategory}
+          existingCategories={categories}
         />
       )}
 
@@ -2838,19 +3009,38 @@ export default function App() {
                 });
 
                 if (!isE2ESession) {
+                  await ensureUserDocumentExists(uid);
                   const batch = writeBatch(db);
                   const catPayload = sanitizeCategoryCreate(
                     migrated.upgradedCategory,
                     uid,
                     resolvedCat.order
                   );
-                  batch.set(doc(db, `users/${uid}/categories`, unlockedCat.id), catPayload, {
-                    merge: true,
+                  batch.update(doc(db, `users/${uid}/categories`, unlockedCat.id), {
+                    name: catPayload.name,
+                    slug: catPayload.slug,
+                    color: catPayload.color,
+                    icon: catPayload.icon,
+                    description: catPayload.description,
+                    isPrivate: catPayload.isPrivate,
+                    privateVaultMeta: catPayload.privateVaultMeta,
+                    order: catPayload.order,
+                    updatedAt: serverTimestamp(),
                   });
                   for (const upLink of migrated.upgradedLinks) {
                     const linkPayload = sanitizeLinkCreate(upLink, uid);
-                    batch.set(doc(db, `users/${uid}/links`, upLink.id), linkPayload, {
-                      merge: true,
+                    batch.update(doc(db, `users/${uid}/links`, upLink.id), {
+                      title: linkPayload.title,
+                      url: linkPayload.url,
+                      categorySlug: linkPayload.categorySlug,
+                      description: linkPayload.description,
+                      tags: linkPayload.tags,
+                      isFavorite: linkPayload.isFavorite,
+                      imageUrl: linkPayload.imageUrl,
+                      faviconUrl: linkPayload.faviconUrl,
+                      isEncrypted: linkPayload.isEncrypted,
+                      cryptoVersion: linkPayload.cryptoVersion,
+                      updatedAt: serverTimestamp(),
                     });
                   }
                   await batch.commit();

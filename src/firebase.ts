@@ -32,6 +32,8 @@ import {
   updateDoc,
   deleteDoc,
   collection,
+  query,
+  where,
   onSnapshot,
   serverTimestamp,
   writeBatch,
@@ -131,6 +133,8 @@ export {
   updateDoc,
   deleteDoc,
   collection,
+  query,
+  where,
   onSnapshot,
   serverTimestamp,
   writeBatch,
@@ -187,6 +191,33 @@ export interface FirestoreErrorInfo {
       email?: string | null;
     }[];
   };
+}
+
+export function logFirestoreError(
+  error: unknown,
+  operationType: OperationType,
+  path: string | null
+): string {
+  const rawMessage = error instanceof Error ? error.message : String(error);
+  const errInfo: FirestoreErrorInfo = {
+    error: rawMessage,
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo:
+        auth.currentUser?.providerData?.map((provider) => ({
+          providerId: provider.providerId,
+          email: provider.email,
+        })) || [],
+    },
+    operationType,
+    path,
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  return rawMessage;
 }
 
 export function handleFirestoreError(
@@ -330,7 +361,9 @@ export function sanitizeCategoryCreate(cat: Partial<Category>, userId: string, o
   const description = (cat.description || '').trim().slice(0, CAT_PROPS.description.maxLength);
   const isDefault = Boolean(cat.isDefault);
   const isPrivate = Boolean(cat.isPrivate);
-  const privateVaultMeta = (cat.privateVaultMeta || '').trim().slice(0, 1024);
+  const privateVaultMeta = (cat.privateVaultMeta || '')
+    .trim()
+    .slice(0, CAT_PROPS.privateVaultMeta.maxLength);
   const order = Math.max(0, Math.min(10000, Number(cat.order ?? orderIndex) || 0));
 
   return {
