@@ -2835,8 +2835,16 @@ export default function App() {
 
           <div className="pt-5 flex flex-col sm:flex-row items-center justify-between gap-2.5 sm:gap-3 text-xs text-zinc-400">
             <div>© 2026 LINKHUB. All rights reserved.</div>
-            <div>
-              Created by <strong className="text-[#ff9000] font-bold">@DEBU-21</strong>
+            <div className="flex items-center gap-1.5 text-xs text-zinc-500">
+              <span>Designed &amp; engineered by</span>
+              <a
+                href="https://github.com/debu-21"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="font-medium text-zinc-300 hover:text-[#ff9000] transition-colors underline decoration-white/15 underline-offset-4 hover:decoration-[#ff9000]/60"
+              >
+                debu-21
+              </a>
             </div>
           </div>
         </div>

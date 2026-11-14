@@ -23,6 +23,7 @@ export interface ShareLinkSanitized {
 
 export interface StoredShareRecord {
   id: string;
+  shortCode: string;
   ownerId: string;
   categoryName: string;
   categorySlug: string;
@@ -41,6 +42,7 @@ export interface StoredShareRecord {
 
 export interface PublicSharePayload {
   shareToken: string;
+  shortCode: string;
   categoryName: string;
   categorySlug: string;
   categoryIcon: string;
@@ -54,6 +56,7 @@ export interface PublicSharePayload {
 
 export interface CreateShareInput {
   ownerId: string;
+  shortCode?: string;
   categoryName: string;
   categorySlug: string;
   categoryIcon?: string;
@@ -64,6 +67,7 @@ export interface CreateShareInput {
 }
 
 const SHARE_TOKEN_REGEX = /^[a-zA-Z0-9_-]{22,128}$/;
+const SHORT_CODE_REGEX = /^LH-?([A-Z0-9]{3})-?([A-Z0-9]{3})$/i;
 
 function readDatabaseId(): string | undefined {
   if (process.env.FIRESTORE_DATABASE_ID?.trim()) {
@@ -84,8 +88,21 @@ export function generateShareToken(): string {
   return `lh2_${crypto.randomBytes(24).toString('base64url')}`;
 }
 
+export function normalizeShortShareCode(raw: string | undefined): string | null {
+  const m = (raw || '').trim().match(SHORT_CODE_REGEX);
+  if (!m) return null;
+  return `LH-${m[1].toUpperCase()}-${m[2].toUpperCase()}`;
+}
+
+export function generateShortShareCode(): string {
+  const num = crypto.randomInt(100000, 1000000);
+  const digits = String(num);
+  return `LH-${digits.slice(0, 3)}-${digits.slice(3, 6)}`;
+}
+
 export function isValidShareTokenFormat(token: string): boolean {
-  return SHARE_TOKEN_REGEX.test((token || '').trim());
+  const clean = (token || '').trim();
+  return SHARE_TOKEN_REGEX.test(clean) || Boolean(normalizeShortShareCode(clean));
 }
 
 export function hashSharePassword(password: string): string {
@@ -159,6 +176,7 @@ export interface SharesRepository {
 
 export class InMemorySharesRepository implements SharesRepository {
   private readonly store = new Map<string, StoredShareRecord>();
+  private readonly shortIndex = new Map<string, string>();
 
   async create(input: CreateShareInput): Promise<StoredShareRecord> {
     const cleanLinks = sanitizeShareLinks(input.links);
@@ -173,8 +191,15 @@ export class InMemorySharesRepository implements SharesRepository {
     const hasPassword = cleanPassword.length > 0;
 
     const id = generateShareToken();
+    const requestedShort = normalizeShortShareCode(input.shortCode);
+    const shortCode =
+      requestedShort && !this.shortIndex.has(requestedShort)
+        ? requestedShort
+        : generateShortShareCode();
+
     const record: StoredShareRecord = {
       id,
+      shortCode,
       ownerId: input.ownerId,
       categoryName: (input.categoryName || 'Shared Collection').trim().slice(0, 60) || 'Shared Collection',
       categorySlug:
@@ -197,20 +222,33 @@ export class InMemorySharesRepository implements SharesRepository {
     };
 
     this.store.set(id, record);
+    this.shortIndex.set(shortCode, id);
     return record;
   }
 
   async getByToken(token: string): Promise<StoredShareRecord | null> {
-    return this.store.get(token) || null;
+    const clean = (token || '').trim();
+    if (this.store.has(clean)) {
+      return this.store.get(clean) || null;
+    }
+    const shortCode = normalizeShortShareCode(clean);
+    if (shortCode) {
+      const targetId = this.shortIndex.get(shortCode);
+      if (targetId) return this.store.get(targetId) || null;
+    }
+    return null;
   }
 
   async revoke(token: string, ownerId: string): Promise<'ok' | 'not_found' | 'forbidden'> {
-    const rec = this.store.get(token);
+    const clean = (token || '').trim();
+    const shortCode = normalizeShortShareCode(clean);
+    const resolvedId = this.store.has(clean) ? clean : shortCode ? this.shortIndex.get(shortCode) || clean : clean;
+    const rec = this.store.get(resolvedId);
     if (!rec) return 'not_found';
     if (rec.ownerId !== ownerId) return 'forbidden';
     rec.revoked = true;
     rec.updatedAt = Date.now();
-    this.store.set(token, rec);
+    this.store.set(resolvedId, rec);
     return 'ok';
   }
 
@@ -253,9 +291,11 @@ class FirestoreAdminSharesRepository implements SharesRepository {
     const hasPassword = cleanPassword.length > 0;
     const passwordHash = hasPassword ? hashSharePassword(cleanPassword) : '';
     const id = generateShareToken();
+    const shortCode = normalizeShortShareCode(input.shortCode) || generateShortShareCode();
 
     const record: StoredShareRecord = {
       id,
+      shortCode,
       ownerId: input.ownerId,
       categoryName: (input.categoryName || 'Shared Collection').trim().slice(0, 60) || 'Shared Collection',
       categorySlug:
@@ -279,6 +319,7 @@ class FirestoreAdminSharesRepository implements SharesRepository {
 
     await this.db.collection('shares').doc(id).set({
       id: record.id,
+      shortCode: record.shortCode,
       ownerId: record.ownerId,
       categoryName: record.categoryName,
       categorySlug: record.categorySlug,
@@ -306,12 +347,27 @@ class FirestoreAdminSharesRepository implements SharesRepository {
   }
 
   async getByToken(token: string): Promise<StoredShareRecord | null> {
-    const snap = await this.db.collection('shares').doc(token).get();
+    const clean = (token || '').trim();
+    let snap = await this.db.collection('shares').doc(clean).get();
+    if (!snap.exists) {
+      const normalizedShort = normalizeShortShareCode(clean);
+      if (normalizedShort) {
+        const qSnap = await this.db
+          .collection('shares')
+          .where('shortCode', '==', normalizedShort)
+          .limit(1)
+          .get();
+        if (!qSnap.empty) {
+          snap = qSnap.docs[0];
+        }
+      }
+    }
     if (!snap.exists) return null;
     const d = snap.data() as Record<string, unknown>;
+    const resolvedId = String(d.id || snap.id);
     let passwordHash = '';
     if (d.hasPassword) {
-      const secretSnap = await this.db.collection('shareSecrets').doc(token).get();
+      const secretSnap = await this.db.collection('shareSecrets').doc(resolvedId).get();
       passwordHash = String(secretSnap.data()?.passwordHash || '');
     }
 
@@ -324,7 +380,8 @@ class FirestoreAdminSharesRepository implements SharesRepository {
     };
 
     return {
-      id: String(d.id || token),
+      id: resolvedId,
+      shortCode: String(d.shortCode || resolvedId.slice(0, 12)),
       ownerId: String(d.ownerId || ''),
       categoryName: String(d.categoryName || 'Shared Collection'),
       categorySlug: String(d.categorySlug || 'shared'),
@@ -343,8 +400,23 @@ class FirestoreAdminSharesRepository implements SharesRepository {
   }
 
   async revoke(token: string, ownerId: string): Promise<'ok' | 'not_found' | 'forbidden'> {
-    const ref = this.db.collection('shares').doc(token);
-    const snap = await ref.get();
+    const clean = (token || '').trim();
+    let ref = this.db.collection('shares').doc(clean);
+    let snap = await ref.get();
+    if (!snap.exists) {
+      const normalizedShort = normalizeShortShareCode(clean);
+      if (normalizedShort) {
+        const qSnap = await this.db
+          .collection('shares')
+          .where('shortCode', '==', normalizedShort)
+          .limit(1)
+          .get();
+        if (!qSnap.empty) {
+          ref = qSnap.docs[0].ref;
+          snap = qSnap.docs[0];
+        }
+      }
+    }
     if (!snap.exists) return 'not_found';
     if (snap.data()?.ownerId !== ownerId) return 'forbidden';
     await ref.update({
@@ -371,8 +443,10 @@ class FirestoreAdminSharesRepository implements SharesRepository {
 
     return snap.docs.map((doc) => {
       const d = doc.data();
+      const id = String(d.id || doc.id);
       return {
-        id: String(d.id || doc.id),
+        id,
+        shortCode: String(d.shortCode || id.slice(0, 12)),
         ownerId: String(d.ownerId || ownerId),
         categoryName: String(d.categoryName || 'Shared Collection'),
         categorySlug: String(d.categorySlug || 'shared'),
@@ -402,6 +476,7 @@ export function createDefaultSharesRepository(): SharesRepository {
 export function toPublicSharePayload(rec: StoredShareRecord): PublicSharePayload {
   return {
     shareToken: rec.id,
+    shortCode: rec.shortCode,
     categoryName: rec.categoryName,
     categorySlug: rec.categorySlug,
     categoryIcon: rec.categoryIcon,

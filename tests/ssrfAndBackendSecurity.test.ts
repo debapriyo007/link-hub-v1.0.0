@@ -298,11 +298,13 @@ test('Server-backed Category Shares enforce high-entropy tokens, password protec
     assert.equal(createRes.status, 201);
     const created = (await createRes.json()) as {
       shareToken: string;
+      shortCode: string;
       hasPassword: boolean;
       readOnly: boolean;
     };
     assert.ok(created.shareToken.startsWith('lh2_'));
     assert.ok(created.shareToken.length >= 30);
+    assert.match(created.shortCode, /^LH-\d{3}-\d{3}$/);
     assert.equal(created.hasPassword, true);
     assert.equal(created.readOnly, true);
 
@@ -317,8 +319,8 @@ test('Server-backed Category Shares enforce high-entropy tokens, password protec
     });
     assert.equal(wrongPw.status, 401);
 
-    // 4. Correct password returns sanitized read-only share bundle
-    const okResolve = await fetch(`${srv.baseUrl}/api/shares/${created.shareToken}/resolve`, {
+    // 4. Correct password returns sanitized read-only share bundle via both shareToken and shortCode
+    const okResolve = await fetch(`${srv.baseUrl}/api/shares/${created.shortCode}/resolve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: 'CorrectHorseBattery99' }),
@@ -346,7 +348,7 @@ test('Server-backed Category Shares enforce high-entropy tokens, password protec
     });
     assert.equal(aliceRevoke.status, 200);
 
-    const afterRevoke = await fetch(`${srv.baseUrl}/api/shares/${created.shareToken}/resolve`, {
+    const afterRevoke = await fetch(`${srv.baseUrl}/api/shares/${created.shortCode}/resolve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ password: 'CorrectHorseBattery99' }),

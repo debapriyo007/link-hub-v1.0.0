@@ -87,6 +87,12 @@ export function generateCategoryShortCode(): string {
   return 'LH-OFF-LINE';
 }
 
+export function normalizeShortCode(rawInput: string): string | null {
+  const m = (rawInput || '').trim().match(/^LH-?([A-Z0-9]{3})-?([A-Z0-9]{3})$/i);
+  if (!m) return null;
+  return `LH-${m[1].toUpperCase()}-${m[2].toUpperCase()}`;
+}
+
 export function extractServerShareToken(rawInput: string): string | null {
   let trimmed = (rawInput || '').trim();
   if (!trimmed) return null;
@@ -108,19 +114,23 @@ export function extractServerShareToken(rawInput: string): string | null {
     }
   }
 
-  return /^lh2_[a-zA-Z0-9_-]{18,120}$/.test(trimmed) ? trimmed : null;
+  if (trimmed.startsWith('LHCAT1:')) return null;
+  if (/^lh2_[a-zA-Z0-9_-]{18,120}$/.test(trimmed)) return trimmed;
+  return normalizeShortCode(trimmed);
 }
 
 /**
- * Creates a server-backed high-entropy share link with TTL, optional password, and revocation support.
+ * Creates a server-backed share link with short share code, TTL, optional password, and revocation support.
  */
 export async function createServerCategoryShare(params: {
   category: Pick<Category, 'name' | 'slug' | 'icon' | 'color'>;
   links: LinkItem[];
+  shortCode?: string;
   ttlHours?: number;
   password?: string;
 }): Promise<{
   shareToken: string;
+  shortCode: string;
   shareUrl: string;
   expiresAt: number;
   hasPassword: boolean;
@@ -157,6 +167,7 @@ export async function createServerCategoryShare(params: {
       ...headers,
     },
     body: JSON.stringify({
+      shortCode: params.shortCode,
       categoryName: params.category.name,
       categorySlug: params.category.slug,
       categoryIcon: params.category.icon || 'folder',
@@ -169,6 +180,7 @@ export async function createServerCategoryShare(params: {
 
   const payload = (await response.json()) as {
     shareToken?: string;
+    shortCode?: string;
     expiresAt?: number;
     hasPassword?: boolean;
     linkCount?: number;
@@ -179,14 +191,16 @@ export async function createServerCategoryShare(params: {
     throw new Error(payload.error || 'Could not create secure share link.');
   }
 
+  const finalCode = payload.shortCode || params.shortCode || payload.shareToken;
   const origin =
     typeof window !== 'undefined' && window.location?.origin
       ? window.location.origin
       : 'https://linkhub.cloud';
-  const shareUrl = `${origin}/?share=${encodeURIComponent(payload.shareToken)}`;
+  const shareUrl = `${origin}/?share=${encodeURIComponent(finalCode)}`;
 
   return {
     shareToken: payload.shareToken,
+    shortCode: finalCode,
     shareUrl,
     expiresAt: payload.expiresAt || Date.now() + 7 * 24 * 3600 * 1000,
     hasPassword: Boolean(payload.hasPassword),
@@ -358,6 +372,26 @@ export function encodeCategorySharePayload(
       ? window.location.origin
       : 'https://linkhub.cloud';
   const shareUrl = `${origin}/?share=${encodeURIComponent(qrPayload)}`;
+
+  if (typeof window !== 'undefined' && sharedLinks.length > 0) {
+    try {
+      const normalizedKey = shortCode.replace(/[^A-Z0-9]/gi, '').toUpperCase();
+      const digitsKey = normalizedKey.replace(/^LH/, '');
+      const raw = window.localStorage.getItem(REGISTRY_STORAGE_KEY);
+      const registry: Record<string, SharedCategoryBundle> = raw ? JSON.parse(raw) : {};
+      const keys = Object.keys(registry);
+      if (keys.length > 60) {
+        for (const oldKey of keys.slice(0, keys.length - 50)) {
+          delete registry[oldKey];
+        }
+      }
+      registry[normalizedKey] = bundle;
+      if (digitsKey) registry[digitsKey] = bundle;
+      window.localStorage.setItem(REGISTRY_STORAGE_KEY, JSON.stringify(registry));
+    } catch {
+      // Ignore storage limits
+    }
+  }
 
   return {
     bundle,

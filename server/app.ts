@@ -569,6 +569,7 @@ ${scrapedDesc ? `Detected Meta Description: ${scrapedDesc}` : ''}`;
       try {
         const record = await sharesRepo.create({
           ownerId,
+          shortCode: typeof body.shortCode === 'string' ? body.shortCode : undefined,
           categoryName: String(body.categoryName || 'Shared Collection'),
           categorySlug: String(body.categorySlug || 'shared'),
           categoryIcon: typeof body.categoryIcon === 'string' ? body.categoryIcon : 'folder',
@@ -580,6 +581,7 @@ ${scrapedDesc ? `Detected Meta Description: ${scrapedDesc}` : ''}`;
 
         res.status(201).json({
           shareToken: record.id,
+          shortCode: record.shortCode,
           expiresAt: record.expiresAt,
           hasPassword: record.hasPassword,
           readOnly: record.readOnly,

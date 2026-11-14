@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import jsQR from 'jsqr';
 import {
   Upload,
   UploadCloud,
@@ -137,6 +138,12 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
           }
           return;
         }
+        // Fallback to local/portable decoder if a short code (LH-XXX-XXX) was created offline
+        const localFallback = decodeCategoryShareInput(clean, categories, links);
+        if (localFallback && localFallback.links.length > 0) {
+          loadDecodedBundle(localFallback);
+          return;
+        }
         setError(result.error);
         playRetroBeep();
         return;
@@ -147,7 +154,7 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
 
     const decoded = decodeCategoryShareInput(clean, categories, links);
     if (!decoded || decoded.links.length === 0) {
-      setError('Share token not found or invalid. Please check and try again.');
+      setError('Share code not found or invalid. Please check and try again.');
       playRetroBeep();
       return;
     }
@@ -161,6 +168,48 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
       return;
     }
     await resolveInputTokenOrCode(inputCode);
+  };
+
+  const decodeQrWithCanvasJsQr = async (file: File): Promise<string | null> => {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const img = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('Invalid image file'));
+        image.src = objectUrl;
+      });
+
+      const naturalW = img.naturalWidth || img.width;
+      const naturalH = img.naturalHeight || img.height;
+      if (!naturalW || !naturalH) return null;
+
+      // Downscale oversized camera photos for fast, accurate QR detection while adding a white quiet zone
+      const maxDim = 960;
+      const scale = Math.min(1, maxDim / Math.max(naturalW, naturalH));
+      const drawW = Math.max(1, Math.round(naturalW * scale));
+      const drawH = Math.max(1, Math.round(naturalH * scale));
+      const pad = 24;
+
+      const canvas = document.createElement('canvas');
+      canvas.width = drawW + pad * 2;
+      canvas.height = drawH + pad * 2;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return null;
+
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, pad, pad, drawW, drawH);
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const decoded = jsQR(imageData.data, imageData.width, imageData.height, {
+        inversionAttempts: 'attemptBoth',
+      });
+      return decoded?.data ? decoded.data.trim() : null;
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
   };
 
   const decodeQrFromImageFile = async (file: File) => {
@@ -177,12 +226,22 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
         }
       }
     } catch {
-      // Browser QR decoding failed or unavailable
+      // Browser native BarcodeDetector failed or unsupported — fall back to jsQR
     }
 
-    // Security fix: Never substitute arbitrary local categories when QR reading fails
+    try {
+      const qrText = await decodeQrWithCanvasJsQr(file);
+      if (qrText) {
+        await resolveInputTokenOrCode(qrText);
+        return;
+      }
+    } catch {
+      // Image decode failed
+    }
+
+    // Never substitute arbitrary local categories when QR reading fails
     playRetroBeep();
-    setError('Could not read a valid LINKHUB QR code from that image. Paste the share token or link instead.');
+    setError('Could not read a valid LINKHUB QR code from that image. Paste the share code or link instead.');
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -304,7 +363,7 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Enter Token / Link
+                Enter Share Code
               </button>
               <button
                 type="button"
@@ -326,8 +385,8 @@ export const ScanQrModal: React.FC<ScanQrModalProps> = ({
             {activeTab === 'code' ? (
               <form onSubmit={handleCodeSubmit} className="pt-0.5">
                 <Input
-                  label="Share Token or Link"
-                  placeholder="Enter share token (e.g. lh2_...) or URL"
+                  label="Share Code or Link"
+                  placeholder="Enter share code (e.g. LH-482-910) or link"
                   value={inputCode}
                   onChange={(e) => {
                     setInputCode(e.target.value);

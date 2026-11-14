@@ -128,15 +128,20 @@ test('export and parse Netscape HTML bookmarks round-trip', () => {
 });
 
 test('encodeCategorySharePayload and decodeCategoryShareInput round-trip via shareUrl and qrPayload', async () => {
-  const { encodeCategorySharePayload, decodeCategoryShareInput } = await import(
-    './categoryShare.ts'
-  );
+  const {
+    encodeCategorySharePayload,
+    decodeCategoryShareInput,
+    extractServerShareToken,
+  } = await import('./categoryShare.ts');
   const { shareUrl, qrPayload, shareCode } = encodeCategorySharePayload(
     { name: 'AI Tools', slug: 'ai', icon: 'cpu', color: '#ff9000' },
     dummyLinks
   );
   assert.ok(shareUrl.includes('?share='));
   assert.match(shareCode, /^LH-\d{3}-\d{3}$/);
+  assert.equal(extractServerShareToken(shareCode), shareCode);
+  assert.equal(extractServerShareToken(`https://example.com/?share=${shareCode}`), shareCode);
+  assert.equal(extractServerShareToken(qrPayload), null);
 
   const fromUrl = decodeCategoryShareInput(shareUrl);
   assert.ok(fromUrl);
