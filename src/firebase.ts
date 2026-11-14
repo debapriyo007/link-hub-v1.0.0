@@ -14,6 +14,7 @@ import {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   deleteUser,
+  updateProfile,
   User as FirebaseUser,
 } from 'firebase/auth';
 import {
@@ -151,6 +152,7 @@ export {
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
   deleteUser,
+  updateProfile,
 };
 export type { FirebaseUser };
 
@@ -307,18 +309,30 @@ export function sanitizeUserProfileCreate(user: {
   };
 }
 
+const VALID_SORT_OPTIONS = new Set(['visits', 'recent', 'oldest', 'alpha', 'alpha-desc']);
+
 export function sanitizePreferencesCreate(
   userId: string,
   prefs: Partial<UserProfile> & { securityAnswerHash?: string }
 ) {
+  const rawAutoLock = prefs.autoLockMinutes;
+  const autoLockMinutes =
+    rawAutoLock !== undefined ? Math.max(0, Math.min(1440, Number(rawAutoLock) || 0)) : 1;
+  const sortOption =
+    typeof prefs.sortOption === 'string' && VALID_SORT_OPTIONS.has(prefs.sortOption)
+      ? prefs.sortOption
+      : 'visits';
+
   return {
     id: 'default',
     userId: sanitizeId(userId, 128),
     firstName: (prefs.firstName || '').trim().slice(0, 60),
     lastName: (prefs.lastName || '').trim().slice(0, 60),
     countryCode: (prefs.countryCode || 'IST (GMT+05:30)').trim().slice(0, 40),
-    autoLockMinutes: Math.max(0, Math.min(1440, Number(prefs.autoLockMinutes ?? 0) || 0)),
+    autoLockMinutes,
     soundEnabled: prefs.soundEnabled !== false,
+    confettiEnabled: prefs.confettiEnabled !== false,
+    sortOption,
     securityQuestion: (prefs.securityQuestion || '').trim().slice(0, 160),
     securityAnswerHash: (prefs.securityAnswerHash || '').trim().slice(0, 256),
     createdAt: serverTimestamp(),
@@ -339,6 +353,10 @@ export function sanitizePreferencesUpdate(
     patch.autoLockMinutes = Math.max(0, Math.min(1440, Number(prefs.autoLockMinutes) || 0));
   }
   if (prefs.soundEnabled !== undefined) patch.soundEnabled = Boolean(prefs.soundEnabled);
+  if (prefs.confettiEnabled !== undefined) patch.confettiEnabled = Boolean(prefs.confettiEnabled);
+  if (typeof prefs.sortOption === 'string' && VALID_SORT_OPTIONS.has(prefs.sortOption)) {
+    patch.sortOption = prefs.sortOption;
+  }
   if (prefs.securityQuestion !== undefined) {
     patch.securityQuestion = prefs.securityQuestion.trim().slice(0, 160);
   }

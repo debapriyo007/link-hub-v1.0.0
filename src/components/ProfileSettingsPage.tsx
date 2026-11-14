@@ -107,15 +107,48 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     const [autoLockOnTabSwitch, setAutoLockOnTabSwitch] = useState(
       (user.autoLockMinutes ?? 1) > 0
     );
-    const [confettiOnSave, setConfettiOnSave] = useState(true);
+    const [confettiOnSave, setConfettiOnSave] = useState(user.confettiEnabled !== false);
 
     const [saving, setSaving] = useState(false);
     const [savedMessage, setSavedMessage] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
+    // Sync local controls whenever real-time Firestore updates arrive from another device
+    useEffect(() => {
+      const parts = (user.displayName || 'LINKHUB User').trim().split(/\s+/);
+      setFirstName(user.firstName ?? (parts[0] || ''));
+      setLastName(user.lastName ?? (parts.slice(1).join(' ') || ''));
+    }, [user.displayName, user.firstName, user.lastName]);
+
+    useEffect(() => {
+      setEmail(user.email || '');
+    }, [user.email]);
+
+    useEffect(() => {
+      setTimezone(user.countryCode || 'IST (GMT+05:30)');
+    }, [user.countryCode]);
+
     useEffect(() => {
       setPhotoURL(user.photoURL || '');
     }, [user.photoURL]);
+
+    useEffect(() => {
+      setSoundEffects(user.soundEnabled !== false);
+    }, [user.soundEnabled]);
+
+    useEffect(() => {
+      setAutoLockOnTabSwitch((user.autoLockMinutes ?? 1) > 0);
+    }, [user.autoLockMinutes]);
+
+    useEffect(() => {
+      setConfettiOnSave(user.confettiEnabled !== false);
+    }, [user.confettiEnabled]);
+
+    useEffect(() => {
+      if (user.securityQuestion && SECURITY_QUESTIONS.includes(user.securityQuestion)) {
+        setSecurityQuestion(user.securityQuestion);
+      }
+    }, [user.securityQuestion]);
 
     const triggerSavedMessage = (msg: string) => {
       setSavedMessage(msg);
@@ -129,11 +162,20 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       try {
         const compressed = await compressAvatarFile(file, 128);
         setPhotoURL(compressed);
+        await onSaveProfile({ photoURL: compressed });
+        triggerSavedMessage('Profile photo synced across devices');
       } catch (err) {
         triggerSavedMessage(
           err instanceof Error ? err.message : 'Could not process image file'
         );
       }
+    };
+
+    const handleRemovePhoto = async () => {
+      playRetroClick();
+      setPhotoURL('');
+      await onSaveProfile({ photoURL: '' });
+      triggerSavedMessage('Profile photo removed');
     };
 
     const handleSaveAccount = async (e?: React.FormEvent | React.MouseEvent) => {
@@ -433,7 +475,9 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                     aria-checked={confettiOnSave}
                     onClick={() => {
                       playRetroClick();
-                      setConfettiOnSave(!confettiOnSave);
+                      const next = !confettiOnSave;
+                      setConfettiOnSave(next);
+                      void onSaveProfile({ confettiEnabled: next });
                     }}
                     aria-label="Celebration Confetti"
                     className={`w-11 h-6 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${
@@ -573,7 +617,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                   {photoURL && (
                     <button
                       type="button"
-                      onClick={() => setPhotoURL('')}
+                      onClick={handleRemovePhoto}
                       className="px-2 py-1.5 text-xs text-zinc-400 hover:text-red-400 cursor-pointer"
                     >
                       Remove
@@ -907,7 +951,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                           {photoURL && (
                             <button
                               type="button"
-                              onClick={() => setPhotoURL('')}
+                              onClick={handleRemovePhoto}
                               className="px-2.5 py-2 rounded-lg text-xs text-zinc-400 hover:text-red-400 transition-colors cursor-pointer"
                             >
                               Remove
@@ -1404,7 +1448,11 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                         desc: 'Show subtle confetti when saving new bookmarks or importing collections.',
                         icon: Sparkles,
                         checked: confettiOnSave,
-                        onChange: () => setConfettiOnSave(!confettiOnSave),
+                        onChange: () => {
+                          const next = !confettiOnSave;
+                          setConfettiOnSave(next);
+                          void onSaveProfile({ confettiEnabled: next });
+                        },
                       },
                     ].map((item) => {
                       const ItemIcon = item.icon;

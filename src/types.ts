@@ -53,6 +53,8 @@ export interface UserProfile {
   securityAnswerHash?: string;
   autoLockMinutes?: number;
   soundEnabled?: boolean;
+  confettiEnabled?: boolean;
+  sortOption?: SortOption;
 }
 
 export interface UserEntitlement {

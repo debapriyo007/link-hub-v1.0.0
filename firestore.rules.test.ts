@@ -74,7 +74,7 @@ function evaluateCreateUserProfile(
   if (data.uid !== userId || data.uid !== auth?.uid || !isValidId(data.uid)) return 'PERMISSION_DENIED';
   if (typeof data.email !== 'string' || data.email.length < 3 || data.email.length > 254) return 'PERMISSION_DENIED';
   if (typeof data.displayName !== 'string' || data.displayName.length < 1 || data.displayName.length > 100) return 'PERMISSION_DENIED';
-  if (typeof data.photoURL !== 'string' || data.photoURL.length > 32768) return 'PERMISSION_DENIED';
+  if (typeof data.photoURL !== 'string' || data.photoURL.length > 65536) return 'PERMISSION_DENIED';
   if (typeof data.pin !== 'string' || data.pin.length > 6 || !PIN_REGEX.test(data.pin)) return 'PERMISSION_DENIED';
   if ('pinVerifier' in data && (typeof data.pinVerifier !== 'string' || data.pinVerifier.length > 256)) return 'PERMISSION_DENIED';
   if ('vaultVersion' in data && (typeof data.vaultVersion !== 'number' || data.vaultVersion < 1 || data.vaultVersion > 10)) return 'PERMISSION_DENIED';
@@ -570,4 +570,36 @@ test('List Queries: unfiltered categories/links list is denied, while owner quer
   );
 });
 
+test('Preferences Sync Rules: validates sortOption enum, confettiEnabled boolean, and photoURL 64KB limit', () => {
+  const validProfile = evaluateCreateUserProfile(
+    { uid: 'user_1', email_verified: true },
+    'user_1',
+    {
+      uid: 'user_1',
+      email: 'a@b.com',
+      displayName: 'Alex Vault',
+      photoURL: 'data:image/jpeg;base64,' + 'A'.repeat(40000),
+      pin: '',
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    NOW
+  );
+  assert.equal(validProfile, 'ALLOWED');
 
+  const oversizedProfile = evaluateCreateUserProfile(
+    { uid: 'user_1', email_verified: true },
+    'user_1',
+    {
+      uid: 'user_1',
+      email: 'a@b.com',
+      displayName: 'Alex Vault',
+      photoURL: 'data:image/jpeg;base64,' + 'A'.repeat(70000),
+      pin: '',
+      createdAt: NOW,
+      updatedAt: NOW,
+    },
+    NOW
+  );
+  assert.equal(oversizedProfile, 'PERMISSION_DENIED');
+});

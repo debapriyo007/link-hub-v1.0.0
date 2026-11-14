@@ -70,7 +70,7 @@ service cloud.firestore {
         && data.displayName.size() >= 1
         && data.displayName.size() <= 100
         && data.photoURL is string
-        && data.photoURL.size() <= 32768
+        && data.photoURL.size() <= 65536
         && data.pin is string
         && data.pin.size() <= 6
         && data.pin.matches('^([0-9]{6})?$')
@@ -84,8 +84,8 @@ service cloud.firestore {
       return data.keys().hasAll(['id', 'userId', 'createdAt', 'updatedAt'])
         && data.keys().hasOnly([
           'id', 'userId', 'firstName', 'lastName', 'countryCode',
-          'autoLockMinutes', 'soundEnabled', 'securityQuestion',
-          'securityAnswerHash', 'createdAt', 'updatedAt'
+          'autoLockMinutes', 'soundEnabled', 'confettiEnabled', 'sortOption',
+          'securityQuestion', 'securityAnswerHash', 'createdAt', 'updatedAt'
         ])
         && hasNoPrivilegeFields(data)
         && data.id is string
@@ -104,6 +104,8 @@ service cloud.firestore {
         && (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 40))
         && (!('autoLockMinutes' in data) || (data.autoLockMinutes is number && data.autoLockMinutes >= 0 && data.autoLockMinutes <= 1440))
         && (!('soundEnabled' in data) || data.soundEnabled is bool)
+        && (!('confettiEnabled' in data) || data.confettiEnabled is bool)
+        && (!('sortOption' in data) || (data.sortOption is string && data.sortOption in ['visits', 'recent', 'oldest', 'alpha', 'alpha-desc']))
         && (!('securityQuestion' in data) || (data.securityQuestion is string && data.securityQuestion.size() <= 160))
         && (!('securityAnswerHash' in data) || (data.securityAnswerHash is string && data.securityAnswerHash.size() <= 256))
         && data.createdAt is timestamp
@@ -309,7 +311,8 @@ service cloud.firestore {
           && incoming().updatedAt == request.time
           && incoming().diff(existing()).affectedKeys().hasOnly([
             'firstName', 'lastName', 'countryCode', 'autoLockMinutes',
-            'soundEnabled', 'securityQuestion', 'securityAnswerHash', 'updatedAt'
+            'soundEnabled', 'confettiEnabled', 'sortOption',
+            'securityQuestion', 'securityAnswerHash', 'updatedAt'
           ]);
 
         allow delete: if isOwner(userId) && isValidId(userId) && isValidId(prefId);

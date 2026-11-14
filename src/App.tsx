@@ -81,6 +81,7 @@ import {
   EmailAuthProvider,
   reauthenticateWithCredential,
   reauthenticateWithPopup,
+  updateProfile,
   sanitizeId,
   sanitizePin,
   sanitizeUserProfileCreate,
@@ -158,6 +159,8 @@ export default function App() {
   const seededDefaultCatsUidRef = useRef<string | null>(null);
   const pendingCategoryIdsRef = useRef<Set<string>>(new Set());
   const deletedCategoryIdsRef = useRef<Set<string>>(new Set());
+  const pendingLinkIdsRef = useRef<Set<string>>(new Set());
+  const deletedLinkIdsRef = useRef<Set<string>>(new Set());
 
   // UI Filter & Sort State
   const [activeCategory, setActiveCategory] = useState<string>('all');
@@ -597,23 +600,32 @@ export default function App() {
           const storedPinVerifier = typeof data.pinVerifier === 'string' ? data.pinVerifier : '';
           const latestExtras = loadProfileExtras(uid);
 
-          // Scrub any legacy plaintext PIN if previously written into profile extras cache
-          saveProfileExtras(uid, latestExtras);
-
-          setUserProfile((prev) => ({
+          // Firestore user document is authoritative over localStorage cache across devices
+          const syncedUserProfile: UserProfile = {
+            ...latestExtras,
             uid,
-            email: latestExtras.email || data.email || fbUser.email || 'user@linkhub.cloud',
+            email:
+              (typeof data.email === 'string' && data.email) ||
+              fbUser.email ||
+              latestExtras.email ||
+              'user@linkhub.cloud',
             emailVerified: true,
             displayName:
-              latestExtras.displayName || data.displayName || fbUser.displayName || 'LINKHUB User',
+              (typeof data.displayName === 'string' && data.displayName) ||
+              fbUser.displayName ||
+              latestExtras.displayName ||
+              'LINKHUB User',
             photoURL:
-              latestExtras.photoURL !== undefined
-                ? latestExtras.photoURL
-                : data.photoURL || fbUser.photoURL || '',
+              typeof data.photoURL === 'string'
+                ? data.photoURL
+                : fbUser.photoURL || latestExtras.photoURL || '',
             pin: storedPin,
             pinVerifier: storedPinVerifier,
             vaultVersion: typeof data.vaultVersion === 'number' ? data.vaultVersion : 1,
-            ...latestExtras,
+          };
+          saveProfileExtras(uid, syncedUserProfile);
+          setUserProfile((prev) => ({
+            ...syncedUserProfile,
             securityAnswerHash: prev?.securityAnswerHash,
           }));
           if (storedPinVerifier || storedPin.length === 6) {
@@ -626,31 +638,42 @@ export default function App() {
           const prefSnap = await getDoc(doc(db, `users/${uid}/preferences`, 'default'));
           if (prefSnap.exists()) {
             const p = prefSnap.data();
-            setUserProfile((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    firstName: typeof p.firstName === 'string' ? p.firstName : prev.firstName,
-                    lastName: typeof p.lastName === 'string' ? p.lastName : prev.lastName,
-                    countryCode:
-                      typeof p.countryCode === 'string' ? p.countryCode : prev.countryCode,
-                    autoLockMinutes:
-                      typeof p.autoLockMinutes === 'number'
-                        ? p.autoLockMinutes
-                        : prev.autoLockMinutes,
-                    soundEnabled:
-                      typeof p.soundEnabled === 'boolean' ? p.soundEnabled : prev.soundEnabled,
-                    securityQuestion:
-                      typeof p.securityQuestion === 'string'
-                        ? p.securityQuestion
-                        : prev.securityQuestion,
-                    securityAnswerHash:
-                      typeof p.securityAnswerHash === 'string'
-                        ? p.securityAnswerHash
-                        : prev.securityAnswerHash,
-                  }
-                : prev
-            );
+            const validSorts: SortOption[] = ['visits', 'recent', 'oldest', 'alpha', 'alpha-desc'];
+            const syncedSort =
+              typeof p.sortOption === 'string' && validSorts.includes(p.sortOption as SortOption)
+                ? (p.sortOption as SortOption)
+                : undefined;
+            if (syncedSort) {
+              setSortOption(syncedSort);
+            }
+            setUserProfile((prev) => {
+              if (!prev) return prev;
+              const merged: UserProfile = {
+                ...prev,
+                firstName: typeof p.firstName === 'string' ? p.firstName : prev.firstName,
+                lastName: typeof p.lastName === 'string' ? p.lastName : prev.lastName,
+                countryCode: typeof p.countryCode === 'string' ? p.countryCode : prev.countryCode,
+                autoLockMinutes:
+                  typeof p.autoLockMinutes === 'number'
+                    ? p.autoLockMinutes
+                    : prev.autoLockMinutes,
+                soundEnabled:
+                  typeof p.soundEnabled === 'boolean' ? p.soundEnabled : prev.soundEnabled,
+                confettiEnabled:
+                  typeof p.confettiEnabled === 'boolean' ? p.confettiEnabled : prev.confettiEnabled,
+                sortOption: syncedSort ?? prev.sortOption,
+                securityQuestion:
+                  typeof p.securityQuestion === 'string'
+                    ? p.securityQuestion
+                    : prev.securityQuestion,
+                securityAnswerHash:
+                  typeof p.securityAnswerHash === 'string'
+                    ? p.securityAnswerHash
+                    : prev.securityAnswerHash,
+              };
+              saveProfileExtras(uid, merged);
+              return merged;
+            });
           }
         } catch {
           // Non-fatal if preferences subcollection does not exist yet
@@ -738,25 +761,80 @@ export default function App() {
       (docSnap) => {
         if (docSnap.exists()) {
           const d = docSnap.data();
-          const extras = loadProfileExtras(uid);
-          setUserProfile((prev) => ({
-            uid,
-            email: extras.email || d.email || prev?.email || '',
-            emailVerified: true,
-            displayName: extras.displayName || d.displayName || prev?.displayName || 'LINKHUB User',
-            photoURL:
-              extras.photoURL !== undefined ? extras.photoURL : d.photoURL ?? prev?.photoURL ?? '',
-            pin: typeof d.pin === 'string' ? d.pin : prev?.pin || '',
-            pinVerifier: typeof d.pinVerifier === 'string' ? d.pinVerifier : prev?.pinVerifier || '',
-            vaultVersion: typeof d.vaultVersion === 'number' ? d.vaultVersion : prev?.vaultVersion ?? 2,
-            ...extras,
-            securityQuestion: prev?.securityQuestion ?? extras.securityQuestion,
-            securityAnswerHash: prev?.securityAnswerHash,
-          }));
+          setUserProfile((prev) => {
+            const nextState: UserProfile = {
+              ...(prev || {}),
+              uid,
+              email:
+                typeof d.email === 'string' && d.email.length > 0
+                  ? d.email
+                  : prev?.email || auth.currentUser?.email || '',
+              emailVerified: true,
+              displayName:
+                typeof d.displayName === 'string' && d.displayName.length > 0
+                  ? d.displayName
+                  : prev?.displayName || auth.currentUser?.displayName || 'LINKHUB User',
+              photoURL:
+                typeof d.photoURL === 'string'
+                  ? d.photoURL
+                  : prev?.photoURL ?? '',
+              pin: typeof d.pin === 'string' ? d.pin : prev?.pin || '',
+              pinVerifier: typeof d.pinVerifier === 'string' ? d.pinVerifier : prev?.pinVerifier || '',
+              vaultVersion: typeof d.vaultVersion === 'number' ? d.vaultVersion : prev?.vaultVersion ?? 2,
+            };
+            saveProfileExtras(uid, nextState);
+            return nextState;
+          });
         }
       },
       (error) => {
         logFirestoreError(error, OperationType.GET, `users/${uid}`);
+      }
+    );
+
+    const unsubPreferences = onSnapshot(
+      doc(db, `users/${uid}/preferences`, 'default'),
+      (prefSnap) => {
+        if (!prefSnap.exists()) return;
+        const p = prefSnap.data();
+        const validSorts: SortOption[] = ['visits', 'recent', 'oldest', 'alpha', 'alpha-desc'];
+        const syncedSort =
+          typeof p.sortOption === 'string' && validSorts.includes(p.sortOption as SortOption)
+            ? (p.sortOption as SortOption)
+            : undefined;
+        if (syncedSort) {
+          setSortOption(syncedSort);
+        }
+        if (typeof p.soundEnabled === 'boolean') {
+          setSoundEnabled(p.soundEnabled);
+        }
+        setUserProfile((prev) => {
+          if (!prev) return prev;
+          const nextState: UserProfile = {
+            ...prev,
+            firstName: typeof p.firstName === 'string' ? p.firstName : prev.firstName,
+            lastName: typeof p.lastName === 'string' ? p.lastName : prev.lastName,
+            countryCode: typeof p.countryCode === 'string' ? p.countryCode : prev.countryCode,
+            autoLockMinutes:
+              typeof p.autoLockMinutes === 'number' ? p.autoLockMinutes : prev.autoLockMinutes,
+            soundEnabled:
+              typeof p.soundEnabled === 'boolean' ? p.soundEnabled : prev.soundEnabled,
+            confettiEnabled:
+              typeof p.confettiEnabled === 'boolean' ? p.confettiEnabled : prev.confettiEnabled,
+            sortOption: syncedSort ?? prev.sortOption,
+            securityQuestion:
+              typeof p.securityQuestion === 'string' ? p.securityQuestion : prev.securityQuestion,
+            securityAnswerHash:
+              typeof p.securityAnswerHash === 'string'
+                ? p.securityAnswerHash
+                : prev.securityAnswerHash,
+          };
+          saveProfileExtras(uid, nextState);
+          return nextState;
+        });
+      },
+      (error) => {
+        logFirestoreError(error, OperationType.GET, `users/${uid}/preferences/default`);
       }
     );
 
@@ -860,23 +938,22 @@ export default function App() {
           };
         });
 
+        const serverIds = new Set(fetchedLinks.map((l) => l.id));
+        serverIds.forEach((id) => pendingLinkIdsRef.current.delete(id));
+        Array.from(deletedLinkIdsRef.current).forEach((id) => {
+          if (!serverIds.has(id)) {
+            deletedLinkIdsRef.current.delete(id);
+          }
+        });
+
         setLinks((prev) => {
-          // Merge server snapshot with any optimistic local items not yet reflected
-          const serverIds = new Set(fetchedLinks.map((l) => l.id));
-          const now = Date.now();
+          const filteredServer = fetchedLinks.filter((l) => !deletedLinkIdsRef.current.has(l.id));
           const pendingLocal = prev.filter(
-            (l) => !serverIds.has(l.id) && now - (l.createdAt || 0) < 15000
+            (l) => pendingLinkIdsRef.current.has(l.id) && !serverIds.has(l.id)
           );
-          const merged = [...pendingLocal, ...fetchedLinks];
-          if (merged.length > 0) {
-            saveCachedLinks(uid, merged);
-            return merged;
-          }
-          const cached = loadCachedLinks(uid);
-          if (cached && cached.length > 0) {
-            return cached;
-          }
-          return fetchedLinks;
+          const merged = [...pendingLocal, ...filteredServer];
+          saveCachedLinks(uid, merged);
+          return merged;
         });
       },
       (error) => {
@@ -886,6 +963,7 @@ export default function App() {
 
     return () => {
       unsubProfile();
+      unsubPreferences();
       unsubCategories();
       unsubLinks();
     };
@@ -893,10 +971,9 @@ export default function App() {
     authReady,
     userProfile?.uid,
     isE2ESession,
-    loadCachedLinks,
     saveCachedLinks,
     saveCachedCategories,
-    loadProfileExtras,
+    saveProfileExtras,
     ensureUserDocumentExists,
   ]);
 
@@ -1188,6 +1265,7 @@ export default function App() {
         updatedAt: Date.now(),
       };
 
+      pendingLinkIdsRef.current.add(newLinkItem.id);
       setLinks((prev) => {
         const next = [newLinkItem, ...prev.filter((l) => l.id !== newLinkItem.id)];
         saveCachedLinks(uid, next);
@@ -1220,14 +1298,16 @@ export default function App() {
       }
 
       showToast(targetCat?.isPrivate ? 'Link encrypted & saved!' : 'Link saved to vault!');
-      try {
-        confetti({
-          particleCount: 40,
-          spread: 60,
-          origin: { y: 0.8 },
-          colors: ['#ff9000', '#ffa31a', '#ffffff'],
-        });
-      } catch {}
+      if (userProfile?.confettiEnabled !== false) {
+        try {
+          confetti({
+            particleCount: 40,
+            spread: 60,
+            origin: { y: 0.8 },
+            colors: ['#ff9000', '#ffa31a', '#ffffff'],
+          });
+        } catch {}
+      }
 
       if (!isE2ESession) {
         try {
@@ -1246,6 +1326,9 @@ export default function App() {
     if (!linkToDelete) return;
     playRetroClick();
 
+    pendingLinkIdsRef.current.delete(id);
+    deletedLinkIdsRef.current.add(id);
+
     setLinks((prev) => {
       const next = prev.filter((l) => l.id !== id);
       saveCachedLinks(userProfile.uid, next);
@@ -1257,7 +1340,7 @@ export default function App() {
       try {
         await deleteDoc(doc(db, `users/${userProfile.uid}/links`, id));
       } catch (error) {
-        console.warn('Could not delete link from Firestore:', error);
+        logFirestoreError(error, OperationType.DELETE, `users/${userProfile.uid}/links/${id}`);
       }
     }
   };
@@ -1971,7 +2054,8 @@ export default function App() {
 
   // Profile & Preferences update handler (syncs profile fields + /users/{uid}/preferences/default)
   const handleSaveProfile = async (
-    updated: Partial<UserProfile> & { securityAnswerPlain?: string }
+    updated: Partial<UserProfile> & { securityAnswerPlain?: string },
+    options?: { silent?: boolean }
   ) => {
     if (!userProfile) return;
     const uid = userProfile.uid;
@@ -1989,19 +2073,13 @@ export default function App() {
       setSoundEnabled(cleanUpdated.soundEnabled !== false);
     }
 
-    const mergedExtras: Partial<UserProfile> = {
-      ...loadProfileExtras(uid),
-      ...cleanUpdated,
-    };
-    saveProfileExtras(uid, mergedExtras);
-
     const nextDisplayName = (
       cleanUpdated.displayName ||
       userProfile.displayName ||
       'LINKHUB User'
     ).slice(0, 100);
-    const nextEmail = (cleanUpdated.email || userProfile.email || 'user@linkhub.cloud').slice(0, 150);
-    const nextPhoto = cleanUpdated.photoURL ?? userProfile.photoURL ?? '';
+    const nextEmail = (cleanUpdated.email || userProfile.email || 'user@linkhub.cloud').slice(0, 254);
+    const nextPhoto = cleanUpdated.photoURL !== undefined ? cleanUpdated.photoURL : userProfile.photoURL ?? '';
 
     const nextProfileState: UserProfile = {
       ...userProfile,
@@ -2011,25 +2089,63 @@ export default function App() {
       photoURL: nextPhoto,
       securityAnswerHash: nextAnswerHash,
     };
+    saveProfileExtras(uid, nextProfileState);
     setUserProfile(nextProfileState);
-    showToast('Settings saved!');
+    if (!options?.silent) {
+      showToast('Settings saved!');
+    }
 
     if (!isE2ESession) {
       try {
+        await ensureUserDocumentExists(uid);
+
         if (
           cleanUpdated.displayName !== undefined ||
           cleanUpdated.email !== undefined ||
           cleanUpdated.photoURL !== undefined
         ) {
+          const safePhoto =
+            typeof nextPhoto === 'string' && nextPhoto.length <= 65536
+              ? nextPhoto
+              : userProfile.photoURL || '';
           const firestorePatch: Record<string, unknown> = {
             displayName: nextDisplayName,
             email: nextEmail,
+            photoURL: safePhoto,
             updatedAt: serverTimestamp(),
           };
-          if (typeof nextPhoto === 'string' && nextPhoto.length <= 32768) {
-            firestorePatch.photoURL = nextPhoto;
+          try {
+            await updateDoc(doc(db, 'users', uid), firestorePatch);
+          } catch {
+            await setDoc(
+              doc(db, 'users', uid),
+              sanitizeUserProfileCreate({
+                uid,
+                email: nextEmail,
+                displayName: nextDisplayName,
+                photoURL: safePhoto,
+                pin: userProfile.pin,
+                pinVerifier: userProfile.pinVerifier,
+                vaultVersion: userProfile.vaultVersion ?? 2,
+              })
+            );
           }
-          await updateDoc(doc(db, 'users', uid), firestorePatch);
+
+          if (auth.currentUser) {
+            const authPatch: { displayName?: string; photoURL?: string } = {};
+            if (cleanUpdated.displayName !== undefined) {
+              authPatch.displayName = nextDisplayName;
+            }
+            if (
+              cleanUpdated.photoURL !== undefined &&
+              (safePhoto === '' || /^https?:\/\//i.test(safePhoto))
+            ) {
+              authPatch.photoURL = safePhoto;
+            }
+            if (Object.keys(authPatch).length > 0) {
+              updateProfile(auth.currentUser, authPatch).catch(() => {});
+            }
+          }
         }
 
         const hasPreferenceChange =
@@ -2038,6 +2154,8 @@ export default function App() {
           cleanUpdated.countryCode !== undefined ||
           cleanUpdated.autoLockMinutes !== undefined ||
           cleanUpdated.soundEnabled !== undefined ||
+          cleanUpdated.confettiEnabled !== undefined ||
+          cleanUpdated.sortOption !== undefined ||
           cleanUpdated.securityQuestion !== undefined ||
           Boolean(securityAnswerPlain);
 
@@ -2054,8 +2172,15 @@ export default function App() {
           }
         }
       } catch (err) {
-        console.warn('Could not sync profile update to Firestore:', err);
+        logFirestoreError(err, OperationType.UPDATE, `users/${uid}`);
       }
+    }
+  };
+
+  const handleSortChange = (nextSort: SortOption) => {
+    setSortOption(nextSort);
+    if (userProfile) {
+      void handleSaveProfile({ sortOption: nextSort }, { silent: true });
     }
   };
 
@@ -2540,7 +2665,7 @@ export default function App() {
                   </svg>
                 }
                 value={sortOption}
-                onChange={(val) => setSortOption(val as SortOption)}
+                onChange={(val) => handleSortChange(val as SortOption)}
                 options={[
                   {
                     value: 'visits',

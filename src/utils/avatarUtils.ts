@@ -35,7 +35,7 @@ export function formatNavbarUserName(
   return 'Account';
 }
 
-export const MAX_AVATAR_URL_LENGTH = 32768;
+export const MAX_AVATAR_URL_LENGTH = 65536;
 
 /**
  * Center-crops and compresses an uploaded image file to a compact data URL
@@ -81,6 +81,7 @@ export async function compressAvatarFile(
       [maxSizePx, 'image/jpeg', 0.8],
       [96, 'image/jpeg', 0.72],
       [80, 'image/jpeg', 0.65],
+      [64, 'image/jpeg', 0.5],
     ];
 
     for (const [dim, mime, quality] of attempts) {
