@@ -5,12 +5,10 @@ import {
   CircleUserRound,
   SlidersHorizontal,
   X,
-  Check,
   FileUp,
   HardDriveDownload,
   LogOut,
   ImagePlus,
-  ShieldAlert,
   QrCode,
   LockKeyhole,
   Volume2,
@@ -23,19 +21,24 @@ import { UserProfile } from '../types.ts';
 import { playRetroClick, playRetroBeep } from '../utils/sound.ts';
 import { compressAvatarFile } from '../utils/avatarUtils.ts';
 import { GlassSelect } from './ui/GlassSelect.tsx';
+import { ToastVariant } from './ui/Toast.tsx';
 
 interface ProfileSettingsPageProps {
   user: UserProfile;
   linksCount: number;
   favoritesCount: number;
   categoriesCount: number;
-  onSaveProfile: (updated: Partial<UserProfile>) => Promise<void>;
+  onSaveProfile: (
+    updated: Partial<UserProfile>,
+    options?: { silent?: boolean }
+  ) => Promise<void>;
   onSavePin: (newPin: string | null) => Promise<void>;
   onLockVault: () => void;
   onImportClick: () => void;
   onExportClick: () => void;
   onScanQrClick?: () => void;
   onSignOut: () => void;
+  onShowToast?: (message: string, variant?: ToastVariant) => void;
   onClose: () => void;
 }
 
@@ -74,6 +77,7 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     onExportClick,
     onScanQrClick,
     onSignOut,
+    onShowToast,
     onClose,
   }) => {
     const [activeSection, setActiveSection] = useState<SettingsSection>('account');
@@ -94,7 +98,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     const hasConfiguredPin = Boolean(user.pinVerifier || user.pin);
     const hasConfiguredRecoveryAnswer = Boolean(user.securityAnswerHash);
     const [pinInput, setPinInput] = useState('');
-    const [pinError, setPinError] = useState('');
     const initialQuestion =
       user.securityQuestion && SECURITY_QUESTIONS.includes(user.securityQuestion)
         ? user.securityQuestion
@@ -110,7 +113,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     const [confettiOnSave, setConfettiOnSave] = useState(user.confettiEnabled !== false);
 
     const [saving, setSaving] = useState(false);
-    const [savedMessage, setSavedMessage] = useState<string | null>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
     // Sync local controls whenever real-time Firestore updates arrive from another device
@@ -150,9 +152,8 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       }
     }, [user.securityQuestion]);
 
-    const triggerSavedMessage = (msg: string) => {
-      setSavedMessage(msg);
-      setTimeout(() => setSavedMessage(null), 2600);
+    const triggerSavedMessage = (msg: string, variant: ToastVariant = 'success') => {
+      onShowToast?.(msg, variant);
     };
 
     const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -162,11 +163,12 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       try {
         const compressed = await compressAvatarFile(file, 128);
         setPhotoURL(compressed);
-        await onSaveProfile({ photoURL: compressed });
-        triggerSavedMessage('Profile photo synced across devices');
+        await onSaveProfile({ photoURL: compressed }, { silent: true });
+        triggerSavedMessage('Profile photo synced across devices', 'success');
       } catch (err) {
         triggerSavedMessage(
-          err instanceof Error ? err.message : 'Could not process image file'
+          err instanceof Error ? err.message : 'Could not process image file',
+          'error'
         );
       }
     };
@@ -174,8 +176,8 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
     const handleRemovePhoto = async () => {
       playRetroClick();
       setPhotoURL('');
-      await onSaveProfile({ photoURL: '' });
-      triggerSavedMessage('Profile photo removed');
+      await onSaveProfile({ photoURL: '' }, { silent: true });
+      triggerSavedMessage('Profile photo removed', 'info');
     };
 
     const handleSaveAccount = async (e?: React.FormEvent | React.MouseEvent) => {
@@ -184,15 +186,18 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       setSaving(true);
       const combinedName = `${firstName.trim()} ${lastName.trim()}`.trim() || 'LINKHUB User';
       try {
-        await onSaveProfile({
-          displayName: combinedName,
-          firstName: firstName.trim(),
-          lastName: lastName.trim(),
-          email: email.trim(),
-          countryCode: timezone,
-          photoURL,
-        });
-        triggerSavedMessage('Account settings saved');
+        await onSaveProfile(
+          {
+            displayName: combinedName,
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            email: email.trim(),
+            countryCode: timezone,
+            photoURL,
+          },
+          { silent: true }
+        );
+        triggerSavedMessage('Account settings saved', 'success');
       } finally {
         setSaving(false);
       }
@@ -202,26 +207,28 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
       if (e) e.preventDefault();
       const cleaned = pinInput.replace(/\D/g, '');
       if (cleaned.length > 0 && cleaned.length !== 6) {
-        setPinError('Security PIN must be exactly 6 digits.');
+        triggerSavedMessage('Security PIN must be exactly 6 digits.', 'error');
         playRetroBeep();
         return;
       }
       playRetroClick();
       setSaving(true);
-      setPinError('');
       try {
         if (cleaned.length === 6) {
           await onSavePin(cleaned);
           setPinInput('');
         }
-        await onSaveProfile({
-          securityQuestion: securityQuestion.trim(),
-          ...(securityAnswer.trim() ? { securityAnswerPlain: securityAnswer.trim() } : {}),
-        } as Partial<UserProfile> & { securityAnswerPlain?: string });
+        await onSaveProfile(
+          {
+            securityQuestion: securityQuestion.trim(),
+            ...(securityAnswer.trim() ? { securityAnswerPlain: securityAnswer.trim() } : {}),
+          } as Partial<UserProfile> & { securityAnswerPlain?: string },
+          { silent: true }
+        );
         if (securityAnswer.trim()) {
           setSecurityAnswer('');
         }
-        triggerSavedMessage('Security & PIN recovery settings updated');
+        triggerSavedMessage('Security & PIN recovery settings updated', 'success');
       } finally {
         setSaving(false);
       }
@@ -677,13 +684,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                 />
               </div>
 
-              {savedMessage && (
-                <div className="text-xs text-[#ff9000] font-medium flex items-center gap-1.5">
-                  <Check size={14} strokeWidth={2.4} />
-                  <span>{savedMessage}</span>
-                </div>
-              )}
-
               <div className="pt-2 flex items-center gap-2.5">
                 <button
                   type="button"
@@ -717,7 +717,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                     value={pinInput}
                     onChange={(e) => {
                       setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
-                      setPinError('');
                     }}
                     placeholder={
                       hasConfiguredPin
@@ -733,7 +732,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                         playRetroClick();
                         setPinInput('');
                         await onSavePin(null);
-                        triggerSavedMessage('Security PIN removed');
                       }}
                       className="h-10 px-3 rounded-xl bg-[#18181f] border border-white/[0.1] text-xs text-red-400 font-medium shrink-0 cursor-pointer"
                     >
@@ -741,12 +739,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                     </button>
                   )}
                 </div>
-                {pinError && (
-                  <p className="text-[11px] text-red-400 flex items-center gap-1 mt-1.5">
-                    <ShieldAlert size={12} />
-                    <span>{pinError}</span>
-                  </p>
-                )}
               </div>
 
               <div>
@@ -777,13 +769,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                   className="w-full h-10 px-3 rounded-xl bg-[#16161d] border border-white/[0.09] focus:border-[#ff9000] text-xs text-white outline-none"
                 />
               </div>
-
-              {savedMessage && (
-                <div className="text-xs text-[#ff9000] font-medium flex items-center gap-1.5">
-                  <Check size={14} strokeWidth={2.4} />
-                  <span>{savedMessage}</span>
-                </div>
-              )}
 
               <div className="pt-2 flex items-center gap-2.5">
                 <button
@@ -1041,12 +1026,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
 
                 {/* Footer Action Bar */}
                 <div className="pt-5 border-t border-white/[0.08] flex items-center justify-end gap-3">
-                  {savedMessage && (
-                    <span className="text-xs text-[#ff9000] font-medium mr-auto flex items-center gap-1.5">
-                      <Check size={14} strokeWidth={2.4} />
-                      <span>{savedMessage}</span>
-                    </span>
-                  )}
                   <button
                     type="button"
                     onClick={onClose}
@@ -1112,7 +1091,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                             value={pinInput}
                             onChange={(e) => {
                               setPinInput(e.target.value.replace(/\D/g, '').slice(0, 6));
-                              setPinError('');
                             }}
                             placeholder={
                               hasConfiguredPin
@@ -1128,7 +1106,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                                 playRetroClick();
                                 setPinInput('');
                                 await onSavePin(null);
-                                triggerSavedMessage('Security PIN removed');
                               }}
                               className="h-10 px-3.5 rounded-lg bg-[#18181f] hover:bg-red-500/15 border border-white/[0.1] text-zinc-300 hover:text-red-400 text-xs font-medium transition-colors cursor-pointer shrink-0"
                             >
@@ -1136,12 +1113,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                             </button>
                           )}
                         </div>
-                        {pinError && (
-                          <p className="text-[11px] text-red-400 flex items-center gap-1">
-                            <ShieldAlert size={12} />
-                            <span>{pinError}</span>
-                          </p>
-                        )}
                       </div>
                     </div>
 
@@ -1212,12 +1183,6 @@ export const ProfileSettingsPage: React.FC<ProfileSettingsPageProps> = React.mem
                 </div>
 
                 <div className="pt-5 border-t border-white/[0.08] flex items-center justify-end gap-3">
-                  {savedMessage && (
-                    <span className="text-xs text-[#ff9000] font-medium mr-auto flex items-center gap-1.5">
-                      <Check size={14} strokeWidth={2.4} />
-                      <span>{savedMessage}</span>
-                    </span>
-                  )}
                   <button
                     type="button"
                     onClick={onClose}

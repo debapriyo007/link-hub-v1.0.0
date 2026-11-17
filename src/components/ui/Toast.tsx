@@ -113,11 +113,11 @@ const CORE_STYLES: Record<
   },
   info: {
     title: 'Info',
-    stripColor: 'bg-[#2F86EB]',
-    circleBg: 'bg-[#2F86EB]',
-    iconContrast: 'text-white',
-    ambientTint: 'radial-gradient(220px circle at 0% 50%, rgba(47, 134, 235, 0.15), transparent 72%)',
-    borderTint: 'border-white/[0.11]',
+    stripColor: 'bg-[#ff9000]',
+    circleBg: 'bg-[#ff9000]',
+    iconContrast: 'text-black',
+    ambientTint: 'radial-gradient(220px circle at 0% 50%, rgba(255, 144, 0, 0.16), transparent 72%)',
+    borderTint: 'border-[#ff9000]/25',
   },
   warning: {
     title: 'Warning',

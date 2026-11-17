@@ -2495,6 +2495,7 @@ export default function App() {
             onExportClick={() => setIsExportOpen(true)}
             onScanQrClick={() => setIsScanQrOpen(true)}
             onSignOut={handleSignOut}
+            onShowToast={showToast}
             linksCount={publicLinks.length}
             categoriesCount={categories.length}
             favoritesCount={starredCount}
